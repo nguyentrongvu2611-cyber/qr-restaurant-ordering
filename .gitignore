@@ -1,0 +1,14 @@
+venv/
+__pycache__/
+*.py[cod]
+.env
+backend/static/images/*
+backend/static/qrcodes/*
+!backend/static/images/.gitkeep
+!backend/static/qrcodes/.gitkeep
+node_modules/
+dist/
+.env.local
+.vscode/
+.idea/
+.DS_Store

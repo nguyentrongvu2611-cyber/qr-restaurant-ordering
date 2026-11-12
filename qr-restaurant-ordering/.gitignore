@@ -1,0 +1,19 @@
+# Python & Backend
+venv/
+__pycache__/
+*.py[cod]
+.env
+backend/static/images/*
+backend/static/qrcodes/*
+!backend/static/images/.gitkeep
+!backend/static/qrcodes/.gitkeep
+
+# Node & Frontend
+node_modules/
+dist/
+.env.local
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
