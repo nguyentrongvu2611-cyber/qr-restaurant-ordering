@@ -26,7 +26,7 @@ class TableSession(Base):
     status = Column(String(20), nullable=False, default="active")
     started_at = Column(DateTime(timezone=True), server_default=func.now())
     ended_at = Column(DateTime(timezone=True), nullable=True)
-
+    merged_into_session_id = Column(BigInteger, ForeignKey("table_sessions.id"), nullable=True)
     table = relationship("DiningTable", back_populates="sessions")
     orders = relationship("Order", back_populates="session")
     service_requests = relationship("ServiceRequest", back_populates="session")

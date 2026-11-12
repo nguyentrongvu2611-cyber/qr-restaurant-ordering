@@ -1,70 +1,56 @@
-import React from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import AuthPage from './pages/AuthPage';
-import AdminMenuPage from './pages/AdminMenuPage';
-import AdminUsersPage from './pages/AdminUsersPage';
-import AdminTablesPage from './pages/AdminTablesPage';
-import AdminLayout from './components/AdminLayout';
-import ProtectedRoute from './components/ProtectedRoute';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import 'bootstrap/dist/css/bootstrap.min.css';
 
-function AdminComingSoon({ title, desc }) {
-  return (
-    <AdminLayout title={title}>
-      <div className="alert alert-info shadow-sm">
-        <h5 className="fw-bold">{title}</h5>
-        <p className="mb-0">{desc}</p>
-      </div>
-    </AdminLayout>
-  );
-}
+import Login from './pages/Auth/Login';
+import ManageStaffPage from './pages/admin/ManageStaffPage';
+import ManageMenuPage from './pages/admin/ManageMenuPage';
+import ManageTablesPage from './pages/admin/ManageTablesPage';
+import KitchenKDS from './pages/Kitchen/KDS';
+import StaffMap from './pages/Staff/TableMap';
+import CashierDashboard from './pages/Cashier/Dashboard';
+import BarScreen from './pages/Bar/BarScreen';
 
-function PlaceholderRolePage({ title, roleName }) {
-  const user = JSON.parse(localStorage.getItem('user') || '{}');
-  const handleLogout = () => {
-    localStorage.clear();
-    window.location.href = '/login';
-  };
-  return (
-    <div className="min-vh-100 bg-light">
-      <nav className="navbar navbar-dark bg-dark px-4">
-        <span className="navbar-brand fw-bold">{title}</span>
-        <div className="d-flex align-items-center gap-3 text-white">
-          <span>Xin chào, <strong>{user.full_name}</strong> ({roleName})</span>
-          <button className="btn btn-outline-light btn-sm" onClick={handleLogout}>Đăng xuất</button>
-        </div>
-      </nav>
-      <div className="container mt-5 text-center">
-        <div className="alert alert-info">
-          Bạn đang ở khu vực dành riêng cho <strong>{roleName}</strong>. Đã chặn cứng quyền truy cập chéo trang.
-        </div>
-      </div>
-    </div>
-  );
-}
+const getUserRole = () => localStorage.getItem('role');
+const getToken = () => localStorage.getItem('token');
 
-export default function App() {
+const RoleRoute = ({ allowedRole, children }) => {
+    const role = getUserRole();
+    const token = getToken();
+    if (!role || !token) return <Navigate to="/login" />;
+    if (role !== allowedRole) {
+        switch(role) {
+            case 'admin': return <Navigate to="/admin" />;
+            case 'kitchen': return <Navigate to="/kitchen" />;
+            case 'staff': return <Navigate to="/staff" />;
+            case 'cashier': return <Navigate to="/cashier" />;
+            case 'bar': return <Navigate to="/bar" />;
+            default: return <Navigate to="/login" />;
+        }
+    }
+    return children;
+};
+
+function App() {
   return (
-    <BrowserRouter>
+    <Router future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <Routes>
-        <Route path="/" element={<Navigate to="/login" replace />} />
-        <Route path="/login" element={<AuthPage />} />
+        <Route path="/login" element={<Login />} />
+        
+        {/* Các trang quản trị của ADMIN */}
+        <Route path="/admin" element={<RoleRoute allowedRole="admin"><ManageStaffPage /></RoleRoute>} />
+        <Route path="/admin/menu" element={<RoleRoute allowedRole="admin"><ManageMenuPage /></RoleRoute>} />
+        <Route path="/admin/tables" element={<RoleRoute allowedRole="admin"><ManageTablesPage /></RoleRoute>} />
 
-        {/* 8 Nhóm chức năng của ADMIN */}
-        <Route path="/admin/dashboard" element={<ProtectedRoute allowedRole="admin"><AdminComingSoon title="1. Tổng quan (Dashboard - ADM02)" desc="Thống kê doanh thu ngày, số đơn, trạng thái bàn." /></ProtectedRoute>} />
-        <Route path="/admin/menu" element={<ProtectedRoute allowedRole="admin"><AdminMenuPage /></ProtectedRoute>} />
-        <Route path="/admin/tables" element={<ProtectedRoute allowedRole="admin"><AdminTablesPage /></ProtectedRoute>} />
-        <Route path="/admin/orders" element={<ProtectedRoute allowedRole="admin"><AdminComingSoon title="4. Quản lý Đơn hàng (ADM11)" desc="Xem danh sách toàn bộ đơn hàng, chi tiết món và hủy đơn khi có sự cố." /></ProtectedRoute>} />
-        <Route path="/admin/users" element={<ProtectedRoute allowedRole="admin"><AdminUsersPage /></ProtectedRoute>} />
-        <Route path="/admin/promotions" element={<ProtectedRoute allowedRole="admin"><AdminComingSoon title="6. Quản lý Khuyến mãi / Voucher (ADM14)" desc="Phân hệ mở rộng quản lý mã giảm giá." /></ProtectedRoute>} />
-        <Route path="/admin/reports" element={<ProtectedRoute allowedRole="admin"><AdminComingSoon title="7. Báo cáo & Thống kê (ADM15 - ADM16)" desc="Biểu đồ doanh thu theo ngày/tháng/năm và Top món bán chạy." /></ProtectedRoute>} />
-        <Route path="/admin/settings" element={<ProtectedRoute allowedRole="admin"><AdminComingSoon title="8. Cài đặt & Hệ thống (ADM01, ADM17, ADM18)" desc="Đổi mật khẩu Admin, xem lịch sử thao tác và cấu hình tên quán/hotline in hóa đơn." /></ProtectedRoute>} />
+        {/* Điều hướng cứng theo Role */}
+        <Route path="/kitchen" element={<RoleRoute allowedRole="kitchen"><KitchenKDS /></RoleRoute>} />
+        <Route path="/staff" element={<RoleRoute allowedRole="staff"><StaffMap /></RoleRoute>} />
+        <Route path="/cashier" element={<RoleRoute allowedRole="cashier"><CashierDashboard /></RoleRoute>} />
+        <Route path="/bar" element={<RoleRoute allowedRole="bar"><BarScreen /></RoleRoute>} />
 
-        {/* Khu vực BẾP & NHÂN VIÊN */}
-        <Route path="/kitchen" element={<ProtectedRoute allowedRole="kitchen"><PlaceholderRolePage title="MÀN HÌNH NHÀ BẾP (KITCHEN)" roleName="Nhân viên Bếp" /></ProtectedRoute>} />
-        <Route path="/staff" element={<ProtectedRoute allowedRole="staff"><PlaceholderRolePage title="MÀN HÌNH PHỤC VỤ & THU NGÂN (STAFF)" roleName="Nhân viên Phục vụ" /></ProtectedRoute>} />
-
-        <Route path="*" element={<Navigate to="/login" replace />} />
+        <Route path="*" element={<Navigate to="/login" />} />
       </Routes>
-    </BrowserRouter>
+    </Router>
   );
 }
+
+export default App;

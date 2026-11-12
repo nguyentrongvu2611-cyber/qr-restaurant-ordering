@@ -2,7 +2,7 @@ from sqlalchemy import Column, BigInteger, String, Text, Integer, Numeric, DateT
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.core.database import Base
-
+from sqlalchemy import Column, BigInteger, String, Integer, Text, DECIMAL, ForeignKey, Boolean, DateTime
 class Order(Base):
     __tablename__ = "orders"
 
@@ -30,7 +30,10 @@ class OrderItem(Base):
     unit_price = Column(Numeric(12, 2), nullable=False)
     item_note = Column(String(255), nullable=True)
     item_status = Column(String(30), nullable=False, default="pending")
-
+    is_priority = Column(Boolean, default=False)
+    cancel_reason = Column(String(255), nullable=True)
+    updated_by = Column(BigInteger, ForeignKey("users.id"), nullable=True)
+    completed_at = Column(DateTime, nullable=True)
     order = relationship("Order", back_populates="items")
 
 class OrderStatusHistory(Base):
