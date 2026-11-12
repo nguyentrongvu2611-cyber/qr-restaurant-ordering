@@ -10,5 +10,6 @@ class Category(Base):
     description = Column(Text, nullable=True)
     display_order = Column(Integer, default=0)
     is_active = Column(Boolean, default=True)
+    station = Column(String(20), nullable=False, default="KITCHEN") 
 
     products = relationship("Product", back_populates="category")
