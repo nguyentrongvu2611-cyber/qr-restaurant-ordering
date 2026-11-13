@@ -1,10 +1,9 @@
 # Hệ thống Quản lý Quán ăn & Gọi món qua QR Code
 
-<<<<<<< HEAD
-venv\Scripts\activate
-uvicorn app.main:app --reload
-
-=======
 venv/Scripts/activate
+<<<<<<< Updated upstream
 python -m uvicorn app.main:socket_app --reload
->>>>>>> feat/admin
+=======
+python -m uvicorn app.main:socket_app --reload
+
+>>>>>>> Stashed changes
