@@ -45,35 +45,38 @@ export default function Login() {
         {error && <div className="alert alert-danger py-2">{error}</div>}
 
         <form onSubmit={handleLogin}>
-          <div className="mb-3">
-            <label className="form-label">Tên đăng nhập</label>
-            <input
-              type="text"
-              className="form-control"
-              required
-              autoFocus
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              placeholder="Nhập tên đăng nhập"
-            />
-          </div>
-          <div className="mb-4">
-            <label className="form-label">Mật khẩu</label>
-            <input
-  type="text"
-  className="form-control"
-  autoComplete="username"
-  required
-  autoFocus
-  value={username}
-  onChange={(e) => setUsername(e.target.value)}
-  placeholder="Nhập tên đăng nhập"
-/>
-          </div>
-          <button type="submit" className="btn btn-primary w-100" disabled={loading}>
-            {loading ? "Đang xác thực..." : "Đăng nhập"}
-          </button>
-        </form>
+  {/* Ô TÊN ĐĂNG NHẬP */}
+  <div className="mb-3">
+    <label className="form-label">Tên đăng nhập</label>
+    <input
+      type="text"
+      className="form-control"
+      required
+      autoFocus
+      value={username}
+      onChange={(e) => setUsername(e.target.value)}
+      placeholder="Nhập tên đăng nhập"
+    />
+  </div>
+
+  {/* Ô MẬT KHẨU (ĐÃ SỬA LỖI) */}
+  <div className="mb-4">
+    <label className="form-label">Mật khẩu</label>
+    <input
+      type="password"                    // <-- Sửa thành password để ẩn chữ
+      className="form-control"
+      autoComplete="current-password"    // <-- Sửa cho đúng chuẩn trình duyệt
+      required
+      value={password}                   // <-- Dùng biến password
+      onChange={(e) => setPassword(e.target.value)} // <-- Dùng hàm setPassword
+      placeholder="Nhập mật khẩu"        // <-- Sửa lại placeholder
+    />
+  </div>
+
+  <button type="submit" className="btn btn-primary w-100" disabled={loading}>
+    {loading ? "Đang xác thực..." : "Đăng nhập"}
+  </button>
+</form>
       </div>
     </div>
   );

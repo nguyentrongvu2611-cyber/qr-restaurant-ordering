@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session, joinedload
 from app.core.database import get_db
 from app.models.menu_item import Product 
+from fastapi import Body
 # Nhớ import thêm Category nếu cần
 
 router = APIRouter(prefix="/api/products", tags=["Products"])
