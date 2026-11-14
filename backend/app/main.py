@@ -6,22 +6,20 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.engine.url import make_url
 import pymysql
-<<<<<<< Updated upstream
 import socketio
 from contextlib import asynccontextmanager
 from app.core.database import engine
 from app.models import Base
-=======
+
 from app.socket_instance import sio
 from app.core.database import engine, SessionLocal
 from app.core.security import get_password_hash
 from app.models import Base
 from app.models.user import User
-from app.routers import auth, admin, menu, tables, payment_qr, orders, products, payments
+from app.routers import auth, admin, menu, tables, payment_qr, orders, products, payments, kitchen
 from sqlalchemy import text, inspect
 from app.routers import kitchen
 import socketio
->>>>>>> Stashed changes
 
 load_dotenv()
 
@@ -75,9 +73,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-<<<<<<< Updated upstream
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
-=======
+
 # Đăng ký router xác thực & quản lý tài khoản
 app.include_router(auth.router)
 app.include_router(admin.router)
@@ -86,8 +83,7 @@ app.include_router(tables.router)
 app.include_router(payment_qr.router)
 app.include_router(orders.router)
 app.include_router(products.router)
-app.include_router(kitchen.router) 
+app.include_router(kitchen.router)
 app.include_router(payments.router)
 
->>>>>>> Stashed changes
 socket_app = socketio.ASGIApp(sio, app)
