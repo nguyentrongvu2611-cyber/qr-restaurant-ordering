@@ -80,6 +80,7 @@ export default function CashierDashboard() {
   const [loading, setLoading] = useState(false);
   const [nowTick, setNowTick] = useState(Date.now());
 
+  const [serviceCalls, setServiceCalls] = useState([]);
   const [draftItemsByTable, setDraftItemsByTable] = useState(() => {
     try { return JSON.parse(localStorage.getItem('pos_cashier_draft_carts') || '{}'); } catch { return {}; }
   });
@@ -213,10 +214,11 @@ export default function CashierDashboard() {
     return `${API_BASE}${rawUrl.startsWith('/') ? '' : '/'}${rawUrl}`;
   };
 
+
   const fetchData = async () => {
     setLoading(true);
     try {
-      const [resTables, resOrders, resMenu, resTimes, resStaff, resShift] = await Promise.all([
+      const [resTables, resOrders, resMenu, resTimes, resStaff, resShift, resCalls] = await Promise.all([
         fetch(`${API_BASE}/api/tables`, { headers: { Authorization: `Bearer ${token}` } }),
         fetch(`${API_BASE}/api/orders`, { headers: { Authorization: `Bearer ${token}` } }),
         fetch(`${API_BASE}/api/products`, { headers: { Authorization: `Bearer ${token}` } })
@@ -224,7 +226,8 @@ export default function CashierDashboard() {
           .catch(() => null),
         fetch(`${API_BASE}/api/kitchen/order-timestamps`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => null),
         fetch(`${API_BASE}/api/kitchen/staff-users`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => null),
-        fetch(`${API_BASE}/api/kitchen/shift/current`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => null)
+        fetch(`${API_BASE}/api/kitchen/shift/current`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => null),
+        fetch(`${API_BASE}/api/kitchen/live-alerts-v2`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => null)
       ]);
 
       let fetchedOrderTimes = {};
@@ -243,6 +246,11 @@ export default function CashierDashboard() {
       if (resShift && resShift.ok) {
         const sData = await resShift.json();
         setShiftInfo(prev => ({ ...prev, ...sData }));
+      }
+
+      if (resCalls && resCalls.ok) {
+        const cData = await resCalls.json();
+        setServiceCalls(cData.calls || []);
       }
 
       if (resTables.ok) setTables(await resTables.json());
@@ -287,10 +295,43 @@ export default function CashierDashboard() {
 
       if (resMenu && resMenu.ok) {
         const menuData = await resMenu.json();
-        setMenuItems(Array.isArray(menuData) ? menuData : (menuData.items || []));
+        const rawMenu = Array.isArray(menuData) ? menuData : (menuData.items || []);
+
+        // 1. Lấy danh sách món đã xóa ẩn từ Server
+        let serverHiddenIds = [];
+        const resHidden = await fetch(`${API_BASE}/api/kitchen/hidden-products`, {
+          headers: { Authorization: `Bearer ${token}` }
+        }).catch(() => null);
+        if (resHidden && resHidden.ok) {
+          const hData = await resHidden.json();
+          serverHiddenIds = hData.hidden_ids || [];
+        }
+        const localHiddenIds = JSON.parse(localStorage.getItem('pos_hidden_product_ids') || '[]');
+        const localHiddenNames = JSON.parse(localStorage.getItem('pos_hidden_product_names') || '[]');
+        const allHiddenIds = new Set([...serverHiddenIds, ...localHiddenIds].map(Number));
+
+        const visibleMenu = rawMenu.filter(
+          m => !allHiddenIds.has(Number(m.id)) && !localHiddenNames.includes(m.name) && m.is_deleted !== true
+        );
+        setMenuItems(visibleMenu);
+
+        // 2. Đồng bộ trạng thái Còn món / Tạm hết theo đúng Database thực tế
+        const dbAvailableNames = new Set(
+          visibleMenu
+            .filter(m => m.is_available === true || m.is_available === 1)
+            .map(m => m.name)
+        );
+        const currentOutNames = JSON.parse(localStorage.getItem('pos_out_of_stock_names') || '[]');
+        const cleanedOutNames = currentOutNames.filter(name => !dbAvailableNames.has(name));
+
+        if (cleanedOutNames.length !== currentOutNames.length) {
+          localStorage.setItem('pos_out_of_stock_names', JSON.stringify(cleanedOutNames));
+        }
+        setOutOfStockNames(cleanedOutNames);
+      } else {
+        setOutOfStockNames(JSON.parse(localStorage.getItem('pos_out_of_stock_names') || '[]'));
       }
 
-      setOutOfStockNames(JSON.parse(localStorage.getItem('pos_out_of_stock_names') || '[]'));
       setRejectedItemIds(JSON.parse(localStorage.getItem('pos_rejected_item_ids') || '[]'));
       setStaffCancelRequests(JSON.parse(localStorage.getItem('pos_staff_cancel_requests') || '[]'));
     } catch (err) {
@@ -309,6 +350,8 @@ export default function CashierDashboard() {
       const { type } = event.data || {};
       if (
         type === 'KITCHEN_OUT_OF_STOCK' ||
+        type === 'PRODUCT_HIDDEN_FROM_MENU' ||
+        type === 'PRODUCT_RESTORED' ||
         type === 'STAFF_REQUEST_CANCEL_ITEM' ||
         type === 'STAFF_SWAPPED_ITEM' ||
         type === 'CUSTOMER_CALL_SERVICE' ||
@@ -324,6 +367,7 @@ export default function CashierDashboard() {
       setOutOfStockNames(JSON.parse(localStorage.getItem('pos_out_of_stock_names') || '[]'));
       setRejectedItemIds(JSON.parse(localStorage.getItem('pos_rejected_item_ids') || '[]'));
       setStaffCancelRequests(JSON.parse(localStorage.getItem('pos_staff_cancel_requests') || '[]'));
+      fetchData();
     };
     window.addEventListener('storage', handleStorage);
 
@@ -342,6 +386,10 @@ export default function CashierDashboard() {
   };
 
   const isProductUnavailable = (product) => {
+    if (!product) return false;
+    if (product.is_available === true || product.is_available === 1) {
+      return outOfStockNames.includes(product.name);
+    }
     return (
       product.is_available === false ||
       product.is_available === 0 ||
@@ -363,15 +411,23 @@ export default function CashierDashboard() {
       }).catch(() => null);
     } else {
       nextOutNames = nextOutNames.filter(n => n !== product.name);
-      await fetch(`${API_BASE}/api/products/${product.id}`, {
+      await fetch(`${API_BASE}/api/kitchen/restore-stock`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ is_available: true })
+        body: JSON.stringify({ product_id: product.id, product_name: product.name })
       }).catch(() => null);
     }
 
     localStorage.setItem('pos_out_of_stock_names', JSON.stringify(nextOutNames));
     setOutOfStockNames(nextOutNames);
+
+    setMenuItems(prev =>
+      prev.map(item =>
+        item.id === product.id || item.name === product.name
+          ? { ...item, is_available: nextAvailable }
+          : item
+      )
+    );
 
     const bc = new BroadcastChannel('smartpos_channel');
     bc.postMessage({ type: nextAvailable ? 'PRODUCT_RESTORED' : 'KITCHEN_OUT_OF_STOCK', payload: { product_name: product.name } });
@@ -380,8 +436,20 @@ export default function CashierDashboard() {
     await fetchData();
   };
 
+  const isSameTableAlert = (callItem, tableObj) => {
+    if (!callItem || !tableObj) return false;
+    if (Number(callItem.table_id) === Number(tableObj.id)) return true;
+    const numA = String(callItem.table_name || '').replace(/\D/g, '');
+    const numB = String(tableObj.table_number || tableObj.name || '').replace(/\D/g, '');
+    return numA !== '' && numA === numB;
+  };
+
   const isTableCalling = (table) => {
-    if (!table || dismissedAlerts.includes(table.id)) return false;
+    if (!table) return false;
+    const hasActiveCall = serviceCalls.some(c => isSameTableAlert(c, table));
+    if (hasActiveCall) return true;
+
+    if (dismissedAlerts.includes(table.id)) return false;
     if (
       table.status === 'payment_pending' ||
       table.status === 'calling_staff' ||
@@ -399,6 +467,12 @@ export default function CashierDashboard() {
   };
 
   const getCallReason = (table) => {
+    const foundCall = serviceCalls.find(c => isSameTableAlert(c, table));
+    if (foundCall) {
+      return foundCall.type === 'CALL_PAYMENT'
+        ? `Gọi thanh toán (${foundCall.payment_method === 'TRANSFER' ? 'QR' : 'Tiền mặt'})`
+        : (foundCall.note || 'Gọi nhân viên');
+    }
     if (table.status === 'payment_pending' || table.payment_requested) return 'Gọi thanh toán';
     if (table.status === 'calling_staff' || table.call_staff || table.need_support) return 'Gọi nhân viên';
     return 'Yêu cầu hỗ trợ';
@@ -406,7 +480,7 @@ export default function CashierDashboard() {
 
   const callingTables = useMemo(() => {
     return tables.filter(t => isTableCalling(t));
-  }, [tables, orders, dismissedAlerts]);
+  }, [tables, orders, dismissedAlerts, serviceCalls]);
 
   useEffect(() => {
     if (callingTables.length > prevAlertCountRef.current) {
@@ -416,14 +490,16 @@ export default function CashierDashboard() {
   }, [callingTables.length]);
 
   const handleResolveAlert = async (e, table) => {
-    e.stopPropagation();
+    if (e) e.stopPropagation();
     setDismissedAlerts(prev => [...prev, table.id]);
+    setServiceCalls(prev => prev.filter(c => Number(c.table_id) !== Number(table.id)));
     try {
-      await fetch(`${API_BASE}/api/tables/${table.id}/resolve-call`, {
-        method: 'POST',
+      await fetch(`${API_BASE}/api/kitchen/live-alerts-v2/${table.id}/resolve`, {
+        method: 'PUT',
         headers: { Authorization: `Bearer ${token}` }
       }).catch(() => null);
     } catch (err) {}
+    await fetchData();
   };
 
   useEffect(() => {
@@ -1617,12 +1693,16 @@ export default function CashierDashboard() {
   });
 
   const allGridItems = useMemo(() => {
+    // Khi đang ở tab Cảnh báo (Yêu cầu thanh toán / Gọi NV), ẩn 2 ô Mang về & Giao đi
+    if (statusRadio === 'CALLING') {
+      return filteredTables;
+    }
     const specials = [
       { id: 'SPECIAL_TAKEAWAY', isSpecial: true, type: 'TAKEAWAY', label: 'Mang về' },
       { id: 'SPECIAL_DELIVERY', isSpecial: true, type: 'DELIVERY', label: 'Giao đi' },
     ];
     return [...specials, ...filteredTables];
-  }, [filteredTables]);
+  }, [filteredTables, statusRadio]);
 
   const ITEMS_PER_PAGE = 24;
   const totalPages = Math.max(1, Math.ceil(allGridItems.length / ITEMS_PER_PAGE));
@@ -3489,7 +3569,7 @@ export default function CashierDashboard() {
               <div className="modal-header bg-dark text-white py-2.5 px-3">
                 <h6 className="modal-title fw-bold mb-0 d-flex align-items-center gap-2">
                   <FileText size={17} className="text-warning" />
-                  <span>{activeReceiptModalData.title} (Chuẩn K80)</span>
+                  <span>{activeReceiptModalData.title} </span>
                 </h6>
                 <button type="button" className="btn-close btn-close-white" onClick={() => setActiveReceiptModalData(null)} />
               </div>

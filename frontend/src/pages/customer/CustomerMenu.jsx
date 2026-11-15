@@ -3,14 +3,15 @@ import { useSearchParams } from 'react-router-dom';
 import { 
   Search, Plus, Minus, Utensils,
   X, CheckCircle2, AlertCircle, Send, ChevronRight, MapPin, Clock,
-  Bell, Ban, Lock, Wallet, QrCode, Sparkles, HelpCircle
+  Bell, Ban, Lock, Wallet, QrCode, HelpCircle
 } from 'lucide-react';
 
 const API_BASE = 'http://127.0.0.1:8000';
 
 export default function CustomerMenu() {
   const [searchParams] = useSearchParams();
-  const token = searchParams.get('token'); 
+  const token = searchParams.get('token');
+  const tableParam = searchParams.get('table') || searchParams.get('table_id');
 
   const [tableInfo, setTableInfo] = useState(null);
   const [menuItems, setMenuItems] = useState([]);
@@ -19,13 +20,14 @@ export default function CustomerMenu() {
   const [activeCategory, setActiveCategory] = useState('Tất cả');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  
+
   const [showCart, setShowCart] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [showCallModal, setShowCallModal] = useState(false);
   const [selectedQuickRequest, setSelectedQuickRequest] = useState('Gọi nhân viên hỗ trợ');
+  const [callingStaffLoading, setCallingStaffLoading] = useState(false);
   const [myOrders, setMyOrders] = useState([]);
-  
+
   const [note, setNote] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [sessionClosed, setSessionClosed] = useState(false);
@@ -39,32 +41,140 @@ export default function CustomerMenu() {
     try { return JSON.parse(localStorage.getItem('pos_rejected_item_ids') || '[]'); } catch { return []; }
   });
 
-  const fetchMyOrders = async () => {
-    if (!tableInfo?.id) return;
+  const getProductImageUrl = (item) => {
+    const rawUrl = item?.image_url || item?.image || item?.thumbnail;
+    if (!rawUrl) return 'https://placehold.co/200x200/e2e8f0/475569?text=Mon+An';
+    if (rawUrl.startsWith('http://') || rawUrl.startsWith('https://')) return rawUrl;
+    return `${API_BASE}${rawUrl.startsWith('/') ? '' : '/'}${rawUrl}`;
+  };
+
+  // LẤY DANH SÁCH MÓN ĐÃ GỌI CỦA BÀN THẬT TỪ DATABASE (KHÔNG BAO GIỜ BỊ KẸT "ĐÃ GỌI (0)")
+  const fetchMyOrders = async (currentTable) => {
+    const tObj = currentTable || tableInfo;
+    if (!tObj?.id) return;
+
     try {
-      const res = await fetch(`${API_BASE}/api/orders/table/${tableInfo.id}/active`);
-      if (res.ok) {
-        const data = await res.json();
+      // 1. Thử lấy từ endpoint /api/orders/table/{id}/active trước
+      const resActive = await fetch(`${API_BASE}/api/orders/table/${tObj.id}/active`).catch(() => null);
+      if (resActive && resActive.ok) {
+        const data = await resActive.json();
         if (data.session_status === 'closed' || data.is_closed) {
           setSessionClosed(true);
           return;
         }
-        setMyOrders(Array.isArray(data) ? data : (data.items || []));
-      } else if (res.status === 410 || res.status === 403) {
-        setSessionClosed(true);
+        const list = Array.isArray(data) ? data : (data.items || []);
+        if (list.length > 0) {
+          // Nếu trả về danh sách Order có chứa mảng items bên trong thì trải phẳng ra
+          if (list[0]?.items || list[0]?.order_items) {
+            const flat = [];
+            list.forEach(ord => {
+              if (['completed', 'cancelled', 'paid'].includes(String(ord.status).toLowerCase())) return;
+              (ord.items || ord.order_items || []).forEach(it => {
+                flat.push({
+                  ...it,
+                  order_id: ord.id,
+                  order_code: ord.order_code,
+                  status: it.item_status || it.status || ord.status
+                });
+              });
+            });
+            setMyOrders(flat);
+          } else {
+            setMyOrders(list);
+          }
+          return;
+        }
+      }
+
+      // 2. Fallback chuẩn xác: Lấy trực tiếp từ /api/orders lọc theo table_id hoặc tên bàn
+      const resAll = await fetch(`${API_BASE}/api/orders`).catch(() => null);
+      if (resAll && resAll.ok) {
+        const allData = await resAll.json();
+        const rawOrders = Array.isArray(allData) ? allData : (allData.items || allData.orders || []);
+        const tName = tObj.name || tObj.table_number || `Bàn ${String(tObj.id).padStart(2, '0')}`;
+
+        const activeTableOrders = rawOrders.filter(o => {
+          const st = String(o.status || '').toLowerCase();
+          if (['completed', 'cancelled', 'paid'].includes(st)) return false;
+          return Number(o.table_id) === Number(tObj.id) || o.table_name === tName;
+        });
+
+        const flatItems = [];
+        activeTableOrders.forEach(ord => {
+          const ordSt = String(ord.status || 'pending').toLowerCase();
+          (ord.items || ord.order_items || []).forEach(it => {
+            const itSt = String(it.item_status || it.status || '').toLowerCase();
+            if (itSt === 'cancelled') return;
+            let effectiveSt = itSt || ordSt;
+            if (effectiveSt === 'pending' && ['confirmed', 'preparing', 'cooking', 'ready'].includes(ordSt)) {
+              effectiveSt = ordSt;
+            }
+            flatItems.push({
+              ...it,
+              id: it.id,
+              name: it.product_name || it.name,
+              product_name: it.product_name || it.name,
+              qty: Number(it.quantity || it.qty || 1),
+              quantity: Number(it.quantity || it.qty || 1),
+              price: Number(it.unit_price || it.price || 0),
+              unit_price: Number(it.unit_price || it.price || 0),
+              status: effectiveSt,
+              order_id: ord.id
+            });
+          });
+        });
+
+        setMyOrders(flatItems);
       }
     } catch (err) {
       console.error(err);
     }
   };
 
+  // LẤY THỰC ĐƠN ĐỒNG BỘ VỚI ADMIN & BẾP (XÓA NHÃN "TẠM HẾT" ẢO TRÊN BÒ LÚC LẮC)
   const fetchMenuProducts = async () => {
     try {
-      const resProducts = await fetch(`${API_BASE}/api/products`);
-      if (resProducts.ok) {
-        setMenuItems(await resProducts.json());
+      const [resProducts, resHidden] = await Promise.all([
+        fetch(`${API_BASE}/api/products`)
+          .then(r => (r && r.ok ? r : fetch(`${API_BASE}/api/menu/products`)))
+          .catch(() => null),
+        fetch(`${API_BASE}/api/kitchen/hidden-products`).catch(() => null)
+      ]);
+
+      let serverHiddenIds = [];
+      if (resHidden && resHidden.ok) {
+        const hData = await resHidden.json();
+        serverHiddenIds = hData.hidden_ids || [];
       }
-      setOutOfStockNames(JSON.parse(localStorage.getItem('pos_out_of_stock_names') || '[]'));
+      const localHiddenIds = JSON.parse(localStorage.getItem('pos_hidden_product_ids') || '[]');
+      const localHiddenNames = JSON.parse(localStorage.getItem('pos_hidden_product_names') || '[]');
+      const allHiddenIds = new Set([...serverHiddenIds, ...localHiddenIds].map(Number));
+
+      if (resProducts && resProducts.ok) {
+        const prodData = await resProducts.json();
+        const rawList = Array.isArray(prodData) ? prodData : (prodData.items || []);
+
+        // 1. Lọc bỏ các món đã bị Admin xóa ẩn
+        const visibleProducts = rawList.filter(
+          p => !allHiddenIds.has(Number(p.id)) && !localHiddenNames.includes(p.name) && p.is_deleted !== true
+        );
+        setMenuItems(visibleProducts);
+
+        // 2. Nếu trên Database món đó đang Còn món (is_available === true/1), tự động xóa khỏi localStorage cũ
+        const dbAvailableNames = new Set(
+          visibleProducts
+            .filter(p => p.is_available === true || p.is_available === 1)
+            .map(p => p.name)
+        );
+        const currentOutNames = JSON.parse(localStorage.getItem('pos_out_of_stock_names') || '[]');
+        const cleanedOutNames = currentOutNames.filter(name => !dbAvailableNames.has(name));
+
+        if (cleanedOutNames.length !== currentOutNames.length) {
+          localStorage.setItem('pos_out_of_stock_names', JSON.stringify(cleanedOutNames));
+        }
+        setOutOfStockNames(cleanedOutNames);
+      }
+
       setRejectedItemIds(JSON.parse(localStorage.getItem('pos_rejected_item_ids') || '[]'));
     } catch (err) {
       console.error(err);
@@ -72,28 +182,36 @@ export default function CustomerMenu() {
   };
 
   useEffect(() => {
-    const fetchData = async () => {
+    const initCustomerPage = async () => {
       try {
-        if (!token) {
-          setError('Không tìm thấy mã bàn. Vui lòng quét lại mã QR.');
-          setLoading(false);
-          return;
-        }
+        let resolvedTable = null;
 
-        const resTable = await fetch(`${API_BASE}/api/tables/qr/${token}`);
-        if (resTable.ok) {
-          const tableData = await resTable.json();
-          if (tableData.session_status === 'closed' || tableData.qr_expired) {
+        if (token) {
+          const resTable = await fetch(`${API_BASE}/api/tables/qr/${token}`).catch(() => null);
+          if (resTable && resTable.ok) {
+            const tableData = await resTable.json();
+            if (tableData.session_status === 'closed' || tableData.qr_expired) {
+              setSessionClosed(true);
+            }
+            resolvedTable = {
+              ...tableData,
+              name: tableData.name || tableData.table_number || `Bàn ${String(tableData.id).padStart(2, '0')}`
+            };
+          } else if (resTable && resTable.status === 410) {
             setSessionClosed(true);
           }
-          setTableInfo(tableData);
-        } else if (resTable.status === 410) {
-          setSessionClosed(true);
-        } else {
-          setTableInfo({ id: 1, name: 'Bàn 01' });
         }
 
-        await fetchMenuProducts();
+        if (!resolvedTable) {
+          const fallbackId = Number(tableParam || token) || 6;
+          resolvedTable = {
+            id: fallbackId,
+            name: `Bàn ${String(fallbackId).padStart(2, '0')}`
+          };
+        }
+
+        setTableInfo(resolvedTable);
+        await Promise.all([fetchMenuProducts(), fetchMyOrders(resolvedTable)]);
       } catch (err) {
         console.error(err);
         setError('Lỗi kết nối đến máy chủ.');
@@ -101,17 +219,16 @@ export default function CustomerMenu() {
         setLoading(false);
       }
     };
-    fetchData();
-  }, [token]);
+    initCustomerPage();
+  }, [token, tableParam]);
 
   useEffect(() => {
     if (!tableInfo?.id || sessionClosed) return;
-    fetchMyOrders();
 
     const interval = setInterval(() => {
-      fetchMyOrders();
+      fetchMyOrders(tableInfo);
       fetchMenuProducts();
-    }, 4000);
+    }, 3500);
 
     const bc = new BroadcastChannel('smartpos_channel');
     bc.onmessage = (event) => {
@@ -120,14 +237,21 @@ export default function CustomerMenu() {
         setOutOfStockNames(JSON.parse(localStorage.getItem('pos_out_of_stock_names') || '[]'));
         setRejectedItemIds(JSON.parse(localStorage.getItem('pos_rejected_item_ids') || '[]'));
         setCart(prev => prev.filter(c => c.name !== payload.product_name));
-        setRejectedNotice(payload);
-        fetchMyOrders();
+        if (!payload.table_id || Number(payload.table_id) === Number(tableInfo.id)) {
+          setRejectedNotice(payload);
+        }
+        fetchMyOrders(tableInfo);
         fetchMenuProducts();
       }
-      if (type === 'PRODUCT_RESTORED' || type === 'STAFF_SWAPPED_ITEM' || type === 'CASHIER_CONFIRMED_CANCEL') {
-        setOutOfStockNames(JSON.parse(localStorage.getItem('pos_out_of_stock_names') || '[]'));
-        setRejectedItemIds(JSON.parse(localStorage.getItem('pos_rejected_item_ids') || '[]'));
-        fetchMyOrders();
+      if (
+        type === 'PRODUCT_RESTORED' ||
+        type === 'PRODUCT_HIDDEN_FROM_MENU' ||
+        type === 'STAFF_SWAPPED_ITEM' ||
+        type === 'CASHIER_CONFIRMED_CANCEL' ||
+        type === 'ORDER_CONFIRMED' ||
+        type === 'EXPO_SERVED'
+      ) {
+        fetchMyOrders(tableInfo);
         fetchMenuProducts();
       }
       if ((type === 'SESSION_CLOSED' || type === 'TABLE_CANCELLED') && payload) {
@@ -137,16 +261,9 @@ export default function CustomerMenu() {
       }
     };
 
-    const handleStorage = () => {
-      setOutOfStockNames(JSON.parse(localStorage.getItem('pos_out_of_stock_names') || '[]'));
-      setRejectedItemIds(JSON.parse(localStorage.getItem('pos_rejected_item_ids') || '[]'));
-    };
-    window.addEventListener('storage', handleStorage);
-
     return () => {
       clearInterval(interval);
       bc.close();
-      window.removeEventListener('storage', handleStorage);
     };
   }, [tableInfo?.id, sessionClosed]);
 
@@ -154,14 +271,21 @@ export default function CustomerMenu() {
     return ['Tất cả', ...new Set(menuItems.map(item => item.category_name || item.category?.name || 'Khác'))];
   }, [menuItems]);
 
+  const isProductOutOfStock = (item) => {
+    if (!item) return false;
+    if (item.is_available === true || item.is_available === 1) {
+      return outOfStockNames.includes(item.name);
+    }
+    return item.is_available === false || item.is_available === 0 || outOfStockNames.includes(item.name);
+  };
+
   const handleAddToCart = (item) => {
-    const isOut = item.is_available === false || item.is_available === 0 || outOfStockNames.includes(item.name);
-    if (isOut) {
+    if (isProductOutOfStock(item)) {
       return alert(`Món "${item.name}" hiện đang tạm hết. Quý khách vui lòng chọn món khác nhé!`);
     }
     const existing = cart.find(c => c.id === item.id);
     if (existing) {
-      setCart(cart.map(c => c.id === item.id ? { ...c, qty: c.qty + 1 } : c));
+      setCart(cart.map(c => (c.id === item.id ? { ...c, qty: c.qty + 1 } : c)));
     } else {
       setCart([...cart, { ...item, qty: 1, note: '' }]);
     }
@@ -171,44 +295,63 @@ export default function CustomerMenu() {
     const existing = cart.find(c => c.id === itemId);
     if (!existing) return;
     if (existing.qty > 1) {
-      setCart(cart.map(c => c.id === itemId ? { ...c, qty: c.qty - 1 } : c));
+      setCart(cart.map(c => (c.id === itemId ? { ...c, qty: c.qty - 1 } : c)));
     } else {
       setCart(cart.filter(c => c.id !== itemId));
     }
   };
 
   const handleItemNoteChange = (itemId, noteText) => {
-    setCart(cart.map(c => c.id === itemId ? { ...c, note: noteText } : c));
+    setCart(cart.map(c => (c.id === itemId ? { ...c, note: noteText } : c)));
   };
 
-  const totalAmount = cart.reduce((sum, item) => sum + (Number(item.price || 0) * item.qty), 0);
+  const totalAmount = cart.reduce((sum, item) => sum + Number(item.price || 0) * item.qty, 0);
   const totalItems = cart.reduce((sum, item) => sum + item.qty, 0);
 
-  // Kiểm tra các món hợp lệ đã gọi và Tổng tiền tạm tính
-  const validOrderedItemsCount = useMemo(() => {
-    return myOrders.filter(item => {
-      const st = String(item.status || item.item_status || '').toLowerCase();
+  // Gom các món đã gọi trùng tên lại để hiển thị gọn đẹp trong "Món đã gọi"
+  const groupedHistoryItems = useMemo(() => {
+    const map = {};
+    myOrders.forEach(item => {
+      const st = String(item.status || item.item_status || 'pending').toLowerCase();
+      if (st === 'cancelled') return;
       const itemName = item.name || item.product_name;
-      const isRejected =
-        ['out_of_stock', 'cancelled', 'canceled', 'cancelled_by_kitchen', 'rejected'].includes(st) ||
+      const isOut =
+        ['out_of_stock', 'cancelled_by_kitchen', 'rejected'].includes(st) ||
         rejectedItemIds.includes(item.id) ||
         (outOfStockNames.includes(itemName) && st !== 'served');
-      return !isRejected;
-    }).length;
+
+      const key = isOut ? `OUT_${item.id}` : `${itemName}__${st}`;
+      const qty = Number(item.qty || item.quantity || 1);
+      const price = Number(item.price || item.unit_price || 0);
+
+      if (!map[key]) {
+        map[key] = {
+          ...item,
+          name: itemName,
+          qty,
+          price,
+          status: st,
+          isRejectedOrOut: isOut
+        };
+      } else {
+        map[key].qty += qty;
+      }
+    });
+    return Object.values(map);
   }, [myOrders, rejectedItemIds, outOfStockNames]);
 
+  const validOrderedItemsCount = useMemo(() => {
+    return groupedHistoryItems
+      .filter(i => !i.isRejectedOrOut)
+      .reduce((s, i) => s + Number(i.qty || 1), 0);
+  }, [groupedHistoryItems]);
+
   const validHistoryTotal = useMemo(() => {
-    return myOrders.reduce((sum, item) => {
-      const st = String(item.status || item.item_status || '').toLowerCase();
-      const itemName = item.name || item.product_name;
-      const isRejected =
-        ['out_of_stock', 'cancelled', 'canceled', 'cancelled_by_kitchen', 'rejected'].includes(st) ||
-        rejectedItemIds.includes(item.id) ||
-        (outOfStockNames.includes(itemName) && st !== 'served');
-      if (isRejected) return sum;
-      return sum + (Number(item.price || item.unit_price || 0) * Number(item.qty || item.quantity || 1));
+    return groupedHistoryItems.reduce((sum, item) => {
+      if (item.isRejectedOrOut) return sum;
+      return sum + Number(item.price || 0) * Number(item.qty || 1);
     }, 0);
-  }, [myOrders, rejectedItemIds, outOfStockNames]);
+  }, [groupedHistoryItems]);
 
   const hasActiveValidOrder = validOrderedItemsCount > 0 && validHistoryTotal > 0;
 
@@ -217,7 +360,7 @@ export default function CustomerMenu() {
     if (!tableInfo) return alert('Lỗi: Không xác định được bàn!');
     if (cart.length === 0) return alert('Giỏ hàng đang trống!');
 
-    const unavailableInCart = cart.find(c => outOfStockNames.includes(c.name));
+    const unavailableInCart = cart.find(c => isProductOutOfStock(c));
     if (unavailableInCart) {
       alert(`⚠️ Món "${unavailableInCart.name}" vừa tạm hết. Hệ thống sẽ bỏ món này khỏi giỏ hàng.`);
       setCart(cart.filter(c => c.id !== unavailableInCart.id));
@@ -232,25 +375,36 @@ export default function CustomerMenu() {
         items: cart.map(item => ({
           product_id: item.id,
           quantity: item.qty,
-          note: item.note
+          price: item.price,
+          unit_price: item.price,
+          note: item.note || ''
         }))
       };
 
-      const res = await fetch(`${API_BASE}/api/orders`, {
+      // Thử gửi qua /api/orders của khách trước, nếu lỗi 404 thì gửi qua /api/kitchen/cashier-create-order
+      let res = await fetch(`${API_BASE}/api/orders`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(orderPayload)
-      });
+      }).catch(() => null);
 
-      if (res.ok) {
+      if (!res || !res.ok) {
+        res = await fetch(`${API_BASE}/api/kitchen/cashier-create-order`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(orderPayload)
+        });
+      }
+
+      if (res && res.ok) {
         setShowCart(false);
         setCart([]);
         setNote('');
-        fetchMyOrders();
+        await fetchMyOrders(tableInfo);
         setShowHistory(true);
       } else {
-        const errData = await res.json().catch(() => ({}));
-        alert(`Lỗi: ${errData.detail || 'Không thể tạo đơn hàng'}`);
+        const errData = res ? await res.json().catch(() => ({})) : {};
+        alert(`Lỗi: ${errData.detail || 'Không thể gửi đơn hàng'}`);
       }
     } catch (err) {
       alert('Lỗi kết nối khi gửi đơn hàng!');
@@ -259,35 +413,44 @@ export default function CustomerMenu() {
     }
   };
 
-  // --- GỌI NHÂN VIÊN / YÊU CẦU THANH TOÁN (CHẶN NẾU CHƯA ĐẶT MÓN) ---
+  // =========================================================================
+  // GỬI YÊU CẦU HỖ TRỢ / GỌI NHÂN VIÊN / GỌI THANH TOÁN LÊN SERVER BACKEND
+  // =========================================================================
   const handleRequestService = async (type, paymentMethod = 'CASH', customNote = '') => {
-    if (!tableInfo?.id) return;
+    if (!tableInfo?.id || callingStaffLoading) return;
 
-    // Chặn tuyệt đối nếu chưa gọi món nào mà bấm Gọi thanh toán
     if (type === 'CALL_PAYMENT' && !hasActiveValidOrder) {
       return alert('Bạn chưa gọi món nào nên chưa thể yêu cầu thanh toán!');
     }
 
-    try {
-      // Gọi sang /api/kitchen/tables/{id}/call đã khai báo trong kitchen.py để không bị lỗi 404
-      await fetch(`${API_BASE}/api/kitchen/tables/${tableInfo.id}/call`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          type,
-          payment_method: paymentMethod,
-          note: customNote || selectedQuickRequest
-        })
-      }).catch(() => null);
+    const requestNote = customNote || selectedQuickRequest;
+    const tName = tableInfo.name || tableInfo.table_number || `Bàn ${String(tableInfo.id).padStart(2, '0')}`;
 
+    setCallingStaffLoading(true);
+    try {
       const reqPayload = {
-        table_id: tableInfo.id,
-        table_name: tableInfo.name || `Bàn 0${tableInfo.id}`,
+        table_id: Number(tableInfo.id),
+        table_name: tName,
         type,
         payment_method: paymentMethod,
-        note: customNote || selectedQuickRequest,
+        note: requestNote,
         timestamp: Date.now()
       };
+
+      // 1. Gửi thẳng vào endpoint mới /api/kitchen/customer-alert (Không bao giờ bị trùng route cũ)
+      await fetch(`${API_BASE}/api/kitchen/live-alerts-v2`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(reqPayload)
+      });
+
+      // 2. Lưu thêm vào localStorage & BroadcastChannel
+      const existingCalls = JSON.parse(localStorage.getItem('pos_customer_service_calls') || '[]');
+      const nextCalls = [
+        reqPayload,
+        ...existingCalls.filter(c => !(Number(c.table_id) === Number(tableInfo.id) && c.type === type))
+      ];
+      localStorage.setItem('pos_customer_service_calls', JSON.stringify(nextCalls));
 
       const bc = new BroadcastChannel('smartpos_channel');
       bc.postMessage({ type: 'CUSTOMER_CALL_SERVICE', payload: reqPayload });
@@ -297,11 +460,13 @@ export default function CustomerMenu() {
       setServiceSuccessMsg(
         type === 'CALL_PAYMENT'
           ? `Đã gửi yêu cầu thanh toán (${paymentMethod === 'TRANSFER' ? 'Chuyển khoản QR' : 'Tiền mặt'}). Thu ngân sẽ hỗ trợ bạn ngay!`
-          : `Đã gửi yêu cầu "${customNote || selectedQuickRequest}" tới nhân viên!`
+          : `Đã gọi nhân viên: "${requestNote}". Nhân viên đang ra hỗ trợ ${tName}!`
       );
-      setTimeout(() => setServiceSuccessMsg(''), 4000);
+      setTimeout(() => setServiceSuccessMsg(''), 5000);
     } catch (e) {
       console.error(e);
+    } finally {
+      setCallingStaffLoading(false);
     }
   };
 
@@ -335,68 +500,69 @@ export default function CustomerMenu() {
   }
 
   return (
-    <div className="vh-100 d-flex justify-content-center bg-light" style={{ fontFamily: 'system-ui, -apple-system, sans-serif' }}>
+    <div className="vh-100 d-flex justify-content-center bg-light" style={{ fontFamily: 'Inter, system-ui, -apple-system, sans-serif' }}>
       <div className="w-100 h-100 d-flex flex-column position-relative bg-white shadow-sm" style={{ maxWidth: '480px' }}>
         
-        {/* HEADER GỌN ĐẸP, THOÁNG ĐÃNG */}
-        <div className="px-3 pt-3 pb-2 shadow-sm sticky-top z-3 bg-white" style={{ borderBottomLeftRadius: '24px', borderBottomRightRadius: '24px' }}>
-          <div className="d-flex justify-content-between align-items-center mb-2.5">
+        {/* HEADER GỌN ĐẸP, KHOẢNG CÁCH CÂN ĐỐI */}
+        <div className="px-3 pt-3 pb-2 shadow-sm sticky-top z-3 bg-white" style={{ borderBottomLeftRadius: '22px', borderBottomRightRadius: '22px' }}>
+          <div className="d-flex justify-content-between align-items-center mb-2">
             <div>
-              <h4 className="fw-bold mb-0 text-dark">Thực Đơn</h4>
-              <div className="text-muted small d-flex align-items-center gap-1 mt-0.5">
+              <h4 className="fw-bolder mb-0 text-dark" style={{ fontSize: '21px' }}>Thực Đơn</h4>
+              <div className="text-muted small d-flex align-items-center gap-1 mt-1">
                 <MapPin size={14} className="text-danger" /> 
-                <span className="fw-bold text-danger">{tableInfo?.name || 'Bàn 01'}</span>
+                <span className="fw-bolder text-danger" style={{ fontSize: '13.5px' }}>{tableInfo?.name || 'Bàn 01'}</span>
               </div>
             </div>
 
             <div className="d-flex align-items-center gap-2">
-              {/* Nút chuông hỗ trợ nhỏ gọn tinh tế */}
               <button
                 onClick={() => setShowCallModal(true)}
-                className="btn btn-light border rounded-pill fw-bold d-flex align-items-center gap-1.5 px-3 py-1.5 shadow-sm text-dark"
+                className="btn btn-light border rounded-pill fw-bold d-inline-flex align-items-center gap-1 px-3 py-1.5 shadow-sm text-dark"
                 style={{ fontSize: '13px' }}
-                title="Gọi nhân viên / Hỗ trợ"
               >
                 <Bell size={15} className="text-danger" />
                 <span>Hỗ trợ</span>
               </button>
 
-              {/* Nút Đã gọi */}
               <button 
                 onClick={() => setShowHistory(true)} 
-                className="btn btn-outline-primary rounded-pill fw-bold d-flex align-items-center gap-1.5 px-3 py-1.5 shadow-sm"
+                className="btn btn-outline-primary rounded-pill fw-bold d-inline-flex align-items-center gap-1 px-3 py-1.5 shadow-sm"
                 style={{ fontSize: '13px' }}
               >
                 <Clock size={15} />
-                <span>Đã gọi ({myOrders.length})</span>
+                <span>Đã gọi ({validOrderedItemsCount})</span>
               </button>
             </div>
           </div>
 
           {serviceSuccessMsg && (
-            <div className="alert alert-success py-2 px-3 small fw-semibold mb-2 rounded-3 d-flex align-items-center gap-2 border-0 shadow-sm" style={{ backgroundColor: '#dcfce7', color: '#166534' }}>
+            <div className="alert alert-success py-2 px-3 small fw-bold mb-2 rounded-3 d-flex align-items-center gap-2 border-0 shadow-sm" style={{ backgroundColor: '#dcfce7', color: '#166534' }}>
               <CheckCircle2 size={16} className="flex-shrink-0" />
               <span>{serviceSuccessMsg}</span>
             </div>
           )}
           
-          <div className="input-group bg-light rounded-4 overflow-hidden border-0 mb-2.5">
-            <span className="input-group-text bg-transparent border-0"><Search size={18} className="text-secondary"/></span>
+          <div className="input-group bg-light rounded-pill overflow-hidden border mb-2">
+            <span className="input-group-text bg-transparent border-0 ps-3"><Search size={17} className="text-secondary"/></span>
             <input 
               type="text" 
-              className="form-control bg-transparent border-0 shadow-none ps-0 text-dark" 
-              placeholder="Tìm tên món ăn..." 
+              className="form-control bg-transparent border-0 shadow-none ps-1 text-dark" 
+              placeholder="Tìm tên món ăn, đồ uống..." 
               value={searchMenu}
               onChange={(e) => setSearchMenu(e.target.value)}
+              style={{ fontSize: '13.5px' }}
             />
           </div>
 
-          <div className="d-flex gap-2 overflow-auto pb-1" style={{ scrollbarWidth: 'none' }}>
+          <div className="d-flex gap-2 overflow-auto pb-1 pt-1" style={{ scrollbarWidth: 'none' }}>
             {categories.map((cat, idx) => (
               <button 
                 key={idx}
                 onClick={() => setActiveCategory(cat)}
-                className={`btn btn-sm rounded-pill px-3 fw-semibold flex-shrink-0 ${activeCategory === cat ? 'btn-primary shadow-sm' : 'btn-light border text-secondary'}`}
+                className={`btn btn-sm rounded-pill px-3 fw-bold flex-shrink-0 ${
+                  activeCategory === cat ? 'btn-primary shadow-sm' : 'btn-light border text-secondary'
+                }`}
+                style={{ fontSize: '12.5px' }}
               >
                 {cat}
               </button>
@@ -405,27 +571,24 @@ export default function CustomerMenu() {
         </div>
 
         {/* DANH SÁCH MÓN ĂN */}
-        <div className="flex-grow-1 overflow-auto p-3" style={{ paddingBottom: totalItems > 0 ? '100px' : '20px', backgroundColor: '#f8f9fa' }}>
-          <div className="d-flex flex-column gap-3">
+        <div className="flex-grow-1 overflow-auto p-3" style={{ paddingBottom: totalItems > 0 ? '100px' : '24px', backgroundColor: '#f8fafc' }}>
+          <div className="d-flex flex-column gap-2">
             {filteredMenu.map(item => {
               const qtyInCart = cart.find(c => c.id === item.id)?.qty || 0;
-              const isOutOfStock =
-                item.is_available === false ||
-                item.is_available === 0 ||
-                outOfStockNames.includes(item.name);
+              const isOutOfStock = isProductOutOfStock(item);
 
               return (
                 <div
                   key={item.id}
-                  className="card border-0 shadow-sm rounded-4 p-2 d-flex flex-row gap-3 bg-white position-relative"
-                  style={{ opacity: isOutOfStock ? 0.55 : 1 }}
+                  className="bg-white border rounded-4 p-2.5 d-flex flex-row align-items-center gap-3 shadow-sm position-relative"
+                  style={{ opacity: isOutOfStock ? 0.6 : 1, padding: '10px 12px' }}
                 >
-                  <div className="position-relative flex-shrink-0" style={{ width: '90px', height: '90px' }}>
+                  <div className="position-relative flex-shrink-0" style={{ width: '84px', height: '84px' }}>
                     <img 
-                      src={item.image_url ? (item.image_url.startsWith('http') ? item.image_url : `${API_BASE}${item.image_url}`) : 'https://placehold.co/100x100?text=No+Image'} 
+                      src={getProductImageUrl(item)} 
                       alt={item.name} 
-                      className="rounded-3 object-fit-cover w-100 h-100" 
-                      onError={(e) => { e.target.src = 'https://placehold.co/100x100?text=No+Image'; }}
+                      className="rounded-3 object-fit-cover w-100 h-100 border" 
+                      onError={(e) => { e.target.src = 'https://placehold.co/200x200/e2e8f0/475569?text=Mon+An'; }}
                     />
                     {isOutOfStock && (
                       <div
@@ -437,30 +600,54 @@ export default function CustomerMenu() {
                     )}
                   </div>
 
-                  <div className="flex-grow-1 d-flex flex-column justify-content-between py-1">
+                  <div className="flex-grow-1 d-flex flex-column justify-content-between" style={{ minWidth: 0 }}>
                     <div>
-                      <h6 className={`fw-bold mb-1 lh-base ${isOutOfStock ? 'text-muted text-decoration-line-through' : 'text-dark'}`} style={{ fontSize: '15px' }}>
+                      <h6 className={`fw-bolder mb-1 text-truncate ${isOutOfStock ? 'text-muted text-decoration-line-through' : 'text-dark'}`} style={{ fontSize: '15px' }}>
                         {item.name}
                       </h6>
-                      {item.description && <p className="text-muted small mb-1 text-truncate-2" style={{ fontSize: '12px' }}>{item.description}</p>}
+                      {item.description && (
+                        <p className="text-muted small mb-1 text-truncate" style={{ fontSize: '12px' }}>
+                          {item.description}
+                        </p>
+                      )}
                     </div>
                     
                     <div className="d-flex justify-content-between align-items-center mt-2">
-                      <span className="text-primary fw-bold" style={{ fontSize: '15px' }}>{item.price?.toLocaleString()}đ</span>
+                      <span className="text-primary fw-bolder" style={{ fontSize: '15px' }}>
+                        {Number(item.price || 0).toLocaleString()}đ
+                      </span>
                       
                       {isOutOfStock ? (
-                        <span className="badge bg-danger bg-opacity-10 text-danger border border-danger rounded-pill px-2.5 py-1.5 fw-bold">
+                        <span className="badge bg-danger bg-opacity-10 text-danger border border-danger rounded-pill px-3 py-1 fw-bold">
                           Tạm hết hàng
                         </span>
                       ) : qtyInCart === 0 ? (
-                        <button onClick={() => handleAddToCart(item)} className="btn btn-primary rounded-circle d-flex align-items-center justify-content-center p-0 shadow-sm" style={{ width: '32px', height: '32px' }}>
+                        <button
+                          onClick={() => handleAddToCart(item)}
+                          className="btn btn-primary rounded-circle d-flex align-items-center justify-content-center p-0 shadow-sm"
+                          style={{ width: '34px', height: '34px' }}
+                        >
                           <Plus size={18} />
                         </button>
                       ) : (
                         <div className="d-flex align-items-center gap-2 bg-primary rounded-pill p-1 shadow-sm">
-                          <button onClick={() => handleRemoveFromCart(item.id)} className="btn btn-sm btn-primary text-white rounded-circle d-flex align-items-center justify-content-center p-0" style={{ width: '26px', height: '26px' }}><Minus size={14}/></button>
-                          <span className="fw-bold text-white" style={{ minWidth: '18px', textAlign: 'center', fontSize: '14px' }}>{qtyInCart}</span>
-                          <button onClick={() => handleAddToCart(item)} className="btn btn-sm btn-primary text-white rounded-circle d-flex align-items-center justify-content-center p-0" style={{ width: '26px', height: '26px' }}><Plus size={14}/></button>
+                          <button
+                            onClick={() => handleRemoveFromCart(item.id)}
+                            className="btn btn-sm btn-primary text-white rounded-circle d-flex align-items-center justify-content-center p-0"
+                            style={{ width: '26px', height: '26px' }}
+                          >
+                            <Minus size={14}/>
+                          </button>
+                          <span className="fw-bold text-white" style={{ minWidth: '18px', textAlign: 'center', fontSize: '14px' }}>
+                            {qtyInCart}
+                          </span>
+                          <button
+                            onClick={() => handleAddToCart(item)}
+                            className="btn btn-sm btn-primary text-white rounded-circle d-flex align-items-center justify-content-center p-0"
+                            style={{ width: '26px', height: '26px' }}
+                          >
+                            <Plus size={14}/>
+                          </button>
                         </div>
                       )}
                     </div>
@@ -493,7 +680,7 @@ export default function CustomerMenu() {
           <div className="position-fixed top-0 start-0 w-100 h-100 d-flex justify-content-center bg-white" style={{ zIndex: 2000 }}>
             <div className="w-100 h-100 d-flex flex-column bg-white" style={{ maxWidth: '480px' }}>
               <div className="d-flex justify-content-between align-items-center p-3 border-bottom bg-white sticky-top">
-                <h5 className="fw-bold mb-0">Giỏ hàng của bạn</h5>
+                <h5 className="fw-bold mb-0">Giỏ hàng của bạn ({tableInfo?.name})</h5>
                 <button onClick={() => setShowCart(false)} className="btn btn-light rounded-circle p-2 shadow-sm">
                   <X size={20} />
                 </button>
@@ -505,7 +692,7 @@ export default function CustomerMenu() {
                     <div key={item.id} className={`p-3 ${index !== cart.length - 1 ? 'border-bottom' : ''}`}>
                       <div className="d-flex gap-3 align-items-start">
                         <img 
-                          src={item.image_url ? (item.image_url.startsWith('http') ? item.image_url : `${API_BASE}${item.image_url}`) : 'https://placehold.co/100x100?text=No+Image'} 
+                          src={getProductImageUrl(item)} 
                           alt={item.name} 
                           className="rounded-3 object-fit-cover flex-shrink-0 border" 
                           style={{ width: '60px', height: '60px' }}
@@ -564,23 +751,17 @@ export default function CustomerMenu() {
               </div>
 
               <div className="overflow-auto flex-grow-1 mb-3">
-                {myOrders.length === 0 ? (
+                {groupedHistoryItems.length === 0 ? (
                   <div className="text-center text-muted py-5">
                     <Utensils size={48} className="mb-3 opacity-25" />
                     <p className="mb-1 fw-bold text-dark">Bạn chưa gọi món nào</p>
-                    <small>Hãy chọn món trên thực đơn và bấm Xác nhận đặt món nhé!</small>
+                    <small>Hãy chọn món trên thực đơn hoặc bấm nút <b>Hỗ trợ</b> để gọi nhân viên nhé!</small>
                   </div>
                 ) : (
                   <div className="d-flex flex-column gap-2">
-                    {myOrders.map((item, idx) => {
-                      const rawStatus = String(item.status || item.item_status || 'pending').toLowerCase();
-                      const itemName = item.name || item.product_name;
-                      const isRejectedOrOut =
-                        ['out_of_stock', 'cancelled', 'canceled', 'cancelled_by_kitchen', 'rejected'].includes(rawStatus) ||
-                        rejectedItemIds.includes(item.id) ||
-                        (outOfStockNames.includes(itemName) && rawStatus !== 'served');
-                      const qty = Number(item.qty || item.quantity || 1);
-                      const price = Number(item.price || item.unit_price || 0);
+                    {groupedHistoryItems.map((item, idx) => {
+                      const rawStatus = item.status;
+                      const isRejectedOrOut = item.isRejectedOrOut;
 
                       return (
                         <div
@@ -591,12 +772,12 @@ export default function CustomerMenu() {
                         >
                           <div>
                             <div className={`fw-bold ${isRejectedOrOut ? 'text-danger text-decoration-line-through' : 'text-dark'}`}>
-                              <span className="text-danger me-2">{qty}x</span> 
-                              {itemName}
+                              <span className="text-danger me-2">{item.qty}x</span> 
+                              {item.name}
                             </div>
                             {item.note && <div className="text-muted small mt-1">* {item.note}</div>}
                             
-                            <div className="mt-1.5">
+                            <div className="mt-1">
                               {isRejectedOrOut ? (
                                 <span className="badge bg-danger text-white">
                                   Hết món • Chờ đổi hoặc hủy (0đ)
@@ -611,7 +792,7 @@ export default function CustomerMenu() {
                                     <span className="badge bg-info text-dark">Đã nấu xong</span>
                                   )}
                                   {rawStatus === 'served' && (
-                                    <span className="badge bg-success">Đã lên món</span>
+                                    <span className="badge bg-success">✓ Đã lên món</span>
                                   )}
                                 </>
                               )}
@@ -622,7 +803,7 @@ export default function CustomerMenu() {
                             {isRejectedOrOut ? (
                               <span className="fw-bold text-danger small">0đ</span>
                             ) : (
-                              <span className="fw-bold text-primary">{(price * qty).toLocaleString()}đ</span>
+                              <span className="fw-bold text-primary">{(item.price * item.qty).toLocaleString()}đ</span>
                             )}
                           </div>
                         </div>
@@ -635,7 +816,7 @@ export default function CustomerMenu() {
               {hasActiveValidOrder && (
                 <div className="border-top pt-3 d-flex justify-content-between align-items-center">
                   <div>
-                    <div className="text-muted small">Tổng tạm tính:</div>
+                    <div className="text-muted small">Tổng tạm tính ({validOrderedItemsCount} phần):</div>
                     <div className="fw-bolder fs-5 text-danger">{validHistoryTotal.toLocaleString()}đ</div>
                   </div>
                   <button
@@ -651,12 +832,12 @@ export default function CustomerMenu() {
         )}
 
         {/* ===================================================================== */}
-        {/* BOTTOM SHEET HỖ TRỢ & THANH TOÁN (THIẾT KẾ HIỆN ĐẠI, CHẶN KHI 0 ĐƠN) */}
+        {/* BOTTOM SHEET HỖ TRỢ & THANH TOÁN (ĐÃ SỬA CSS ĐẸP & KẾT NỐI API SERVER) */}
         {/* ===================================================================== */}
         {showCallModal && (
           <div
             className="position-fixed top-0 start-0 w-100 h-100 d-flex flex-column justify-content-end"
-            style={{ zIndex: 2600, backgroundColor: 'rgba(15, 23, 42, 0.6)', backdropFilter: 'blur(2px)' }}
+            style={{ zIndex: 2600, backgroundColor: 'rgba(15, 23, 42, 0.6)', backdropFilter: 'blur(3px)' }}
             onClick={() => setShowCallModal(false)}
           >
             <div
@@ -664,7 +845,6 @@ export default function CustomerMenu() {
               style={{ maxWidth: '480px', margin: '0 auto' }}
               onClick={e => e.stopPropagation()}
             >
-              {/* Thanh gạch ngang kéo (Drag Handle) */}
               <div className="mx-auto mb-3 rounded-pill bg-secondary bg-opacity-25" style={{ width: '42px', height: '5px' }}></div>
 
               <div className="d-flex justify-content-between align-items-center mb-3">
@@ -677,17 +857,17 @@ export default function CustomerMenu() {
                 </button>
               </div>
 
-              {/* PHẦN 1: GỌI NHÂN VIÊN HỖ TRỢ TẠI BÀN (LUÔN MỞ) */}
+              {/* PHẦN 1: GỌI NHÂN VIÊN HỖ TRỢ TẠI BÀN (KỂ CẢ KHI CHƯA GỌI MÓN VẪN BẤM GỌI ĐƯỢC NGAY) */}
               <div className="p-3 rounded-4 border bg-light mb-3">
-                <div className="d-flex align-items-center gap-2 fw-bold text-dark mb-2" style={{ fontSize: '14px' }}>
+                <div className="d-flex align-items-center gap-2 fw-bold text-dark mb-2" style={{ fontSize: '14.5px' }}>
                   <Bell size={16} className="text-primary" />
-                  <span>1. Gọi nhân viên hỗ trợ</span>
+                  <span>1. Gọi nhân viên hỗ trợ tại bàn</span>
                 </div>
 
-                {/* Các tag chọn nhanh lý do gọi */}
-                <div className="d-flex flex-wrap gap-1.5 mb-3">
+                <div className="d-flex flex-wrap gap-2 mb-3">
                   {[
                     'Gọi nhân viên hỗ trợ',
+                    'Nhờ nhân viên ghi order tại bàn',
                     'Xin thêm đá / trà đá',
                     'Xin thêm chén / đũa / giấy ăn',
                     'Nhờ tư vấn thực đơn'
@@ -696,12 +876,12 @@ export default function CustomerMenu() {
                       key={tag}
                       type="button"
                       onClick={() => setSelectedQuickRequest(tag)}
-                      className={`btn btn-xs rounded-pill px-2.5 py-1 fw-semibold ${
+                      className={`btn btn-sm rounded-pill px-3 py-1 fw-semibold ${
                         selectedQuickRequest === tag
                           ? 'btn-primary text-white shadow-sm'
                           : 'bg-white text-secondary border'
                       }`}
-                      style={{ fontSize: '12px' }}
+                      style={{ fontSize: '12.5px' }}
                     >
                       {tag}
                     </button>
@@ -710,37 +890,41 @@ export default function CustomerMenu() {
 
                 <button
                   onClick={() => handleRequestService('CALL_STAFF', 'NONE', selectedQuickRequest)}
+                  disabled={callingStaffLoading}
                   className="btn btn-primary w-100 py-2.5 rounded-3 fw-bold shadow-sm d-flex align-items-center justify-content-center gap-2"
+                  style={{ padding: '10px 16px', fontSize: '14px' }}
                 >
-                  <Send size={15} /> Gửi yêu cầu: "{selectedQuickRequest}"
+                  <Send size={16} />
+                  <span>{callingStaffLoading ? 'Đang gọi nhân viên...' : `Gửi yêu cầu: "${selectedQuickRequest}"`}</span>
                 </button>
               </div>
 
-              {/* PHẦN 2: YÊU CẦU THANH TOÁN (CHỈ BẬT KHI ĐÃ ĐẶT MÓN) */}
+              {/* PHẦN 2: YÊU CẦU THANH TOÁN */}
               <div className="p-3 rounded-4 border" style={{ backgroundColor: hasActiveValidOrder ? '#ffffff' : '#f8fafc' }}>
                 <div className="d-flex justify-content-between align-items-center mb-2">
-                  <div className="d-flex align-items-center gap-2 fw-bold text-dark" style={{ fontSize: '14px' }}>
+                  <div className="d-flex align-items-center gap-2 fw-bold text-dark" style={{ fontSize: '14.5px' }}>
                     <Wallet size={16} className="text-success" />
                     <span>2. Yêu cầu thanh toán</span>
                   </div>
                   {hasActiveValidOrder && (
-                    <span className="badge bg-danger bg-opacity-10 text-danger fw-bold px-2.5 py-1 rounded-pill">
+                    <span className="badge bg-danger bg-opacity-10 text-danger fw-bold px-3 py-1 rounded-pill">
                       Tạm tính: {validHistoryTotal.toLocaleString()}đ
                     </span>
                   )}
                 </div>
 
                 {!hasActiveValidOrder ? (
-                  <div className="p-2.5 rounded-3 bg-secondary bg-opacity-10 text-secondary small d-flex align-items-center gap-2">
+                  <div className="p-2 rounded-3 bg-secondary bg-opacity-10 text-secondary small d-flex align-items-center gap-2">
                     <HelpCircle size={18} className="flex-shrink-0" />
-                    <span>Bạn chưa đặt món nào (`Đã gọi: 0`). Vui lòng đặt món trước khi gọi thanh toán nhé!</span>
+                    <span>Bàn hiện chưa có món ăn nào đang mở. Nếu bạn muốn gọi món trực tiếp, hãy bấm nút <b>Gọi nhân viên hỗ trợ</b> ở trên nhé!</span>
                   </div>
                 ) : (
                   <div className="row g-2 mt-1">
                     <div className="col-6">
                       <button
                         onClick={() => handleRequestService('CALL_PAYMENT', 'CASH', 'Thanh toán Tiền mặt')}
-                        className="btn btn-outline-success w-100 py-2.5 rounded-3 fw-bold d-flex flex-column align-items-center gap-1"
+                        disabled={callingStaffLoading}
+                        className="btn btn-outline-success w-100 py-2 rounded-3 fw-bold d-flex flex-column align-items-center gap-1"
                       >
                         <Wallet size={20} />
                         <span style={{ fontSize: '13px' }}>Tiền mặt</span>
@@ -749,7 +933,8 @@ export default function CustomerMenu() {
                     <div className="col-6">
                       <button
                         onClick={() => handleRequestService('CALL_PAYMENT', 'TRANSFER', 'Thanh toán Chuyển khoản QR')}
-                        className="btn btn-outline-primary w-100 py-2.5 rounded-3 fw-bold d-flex flex-column align-items-center gap-1"
+                        disabled={callingStaffLoading}
+                        className="btn btn-outline-primary w-100 py-2 rounded-3 fw-bold d-flex flex-column align-items-center gap-1"
                       >
                         <QrCode size={20} />
                         <span style={{ fontSize: '13px' }}>Chuyển khoản QR</span>

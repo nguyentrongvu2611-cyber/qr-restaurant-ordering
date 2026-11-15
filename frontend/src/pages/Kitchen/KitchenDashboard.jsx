@@ -405,22 +405,24 @@ export default function KitchenDashboard() {
       .sort((a, b) => b.totalQty - a.totalQty);
   }, [kitchenOrderTickets]);
 
-  // DỮ LIỆU MÀN HÌNH QUẦY BAR (THEO TỪNG ORDER FIFO)
-  const barFastItems = useMemo(() => {
-    const list = [];
-    enrichedOrders.forEach(order => {
-      order.enrichedItems.forEach(item => {
-        if (item.flowType === 'BAR_FAST') {
-          list.push({
-            ...item,
-            batchNumber: order.batchNumber,
-            isAddOnBatch: order.isAddOnBatch
-          });
-        }
-      });
-    });
-    return list;
+  // DỮ LIỆU LUỒNG PHỤC VỤ NHANH (GOM THEO TỪNG PHIẾU ORDER GỌN ĐẸP, KHÔNG XÉ LẺ TỪNG LON)
+  const barFastTickets = useMemo(() => {
+    return enrichedOrders
+      .map(order => {
+        const fItems = order.enrichedItems.filter(it => it.flowType === 'BAR_FAST');
+        return {
+          ...order,
+          ticketKey: `FAST_ORD_${order.id}`,
+          activeFastItems: fItems
+        };
+      })
+      .filter(o => o.activeFastItems.length > 0)
+      .map((o, idx) => ({ ...o, seqNumber: idx + 1 }));
   }, [enrichedOrders]);
+
+  const barFastItems = useMemo(() => {
+    return barFastTickets.flatMap(t => t.activeFastItems);
+  }, [barFastTickets]);
 
   const barCraftOrderTickets = useMemo(() => {
     return enrichedOrders
@@ -1077,64 +1079,155 @@ export default function KitchenDashboard() {
         <div className="flex-grow-1 p-2 overflow-hidden">
           <div className="bar-main-split h-100">
             
+            {/* CỘT 1: LUỒNG PHỤC VỤ NHANH (TỰ ĐỘNG GOM CÁC LON BIA/NƯỚC NGỌT CÙNG ĐƠN VÀO 1 THẺ) */}
             <div className="right-panel-box h-100">
-              <div className="right-panel-header" style={{ backgroundColor: '#ecfdf5' }}>
+              <div className="right-panel-header" style={{ backgroundColor: '#ecfdf5', borderBottom: '1px solid #a7f3d0' }}>
                 <div>
                   <div className="fw-bolder text-success" style={{ fontSize: '13px' }}>1. LUỒNG PHỤC VỤ NHANH</div>
-                  <div className="text-secondary" style={{ fontSize: '10.5px' }}>Nước đóng chai, lon, bia (Giao luôn)</div>
+                  <div className="text-secondary" style={{ fontSize: '10.5px' }}>Nước đóng chai, lon, bia (Gom theo bàn)</div>
                 </div>
-                <span className="badge bg-success text-white">{barFastItems.length}</span>
+                <span className="badge rounded-pill bg-success text-white fw-bold px-2.5 py-1">
+                  {barFastItems.reduce((sum, it) => sum + Number(it.quantity || 1), 0)} món
+                </span>
               </div>
 
-              <div className="right-panel-body">
-                {barFastItems.length === 0 ? (
-                  <div className="text-center text-muted py-5 small">Không có đơn nước đóng chai/lon</div>
-                ) : (
-                  barFastItems.map(item => {
-                    const fastKey = `FAST_${item.id}`;
-                    const currentWaiter = selectedWaiterByTicket[fastKey] || defaultWaiterName;
+              <div className="right-panel-body" style={{ backgroundColor: '#f8fafc', padding: '10px' }}>
+                {(() => {
+                  if (barFastItems.length === 0) {
                     return (
-                      <div key={item.id} className="right-inner-card border bg-light">
-                        <div className="d-flex justify-content-between align-items-center mb-1">
-                          <span className="badge bg-primary text-white">
-                            {item.tableName} {item.isAddOnBatch ? `(L${item.batchNumber})` : ''}
-                          </span>
-                          <span className="text-muted" style={{ fontSize: '10.5px' }}>{item.orderCode} • {item.orderTimeText}</span>
-                        </div>
-                        <div className="fw-bold text-dark mb-2" style={{ fontSize: '13.5px' }}>
-                          <span className="text-danger me-1">{item.quantity}x</span>
-                          {item.product_name || item.name}
+                      <div className="text-center text-muted py-5 small">
+                        Không có đơn nước đóng chai/lon
+                      </div>
+                    );
+                  }
+
+                  // Tự động gom các món trong barFastItems có cùng orderId / orderCode vào chung 1 thẻ
+                  const groupedMap = {};
+                  barFastItems.forEach((item) => {
+                    const gKey = `${item.orderId || item.orderCode}_${item.tableName}`;
+                    if (!groupedMap[gKey]) {
+                      groupedMap[gKey] = {
+                        ticketKey: `FAST_GROUP_${gKey}`,
+                        tableName: item.tableName,
+                        orderCode: item.orderCode,
+                        orderTimeText: item.orderTimeText,
+                        elapsedLabel: item.elapsedLabel || `${item.elapsedMins || 0}p`,
+                        batchNumber: item.batchNumber,
+                        isAddOnBatch: item.isAddOnBatch,
+                        items: []
+                      };
+                    }
+                    groupedMap[gKey].items.push(item);
+                  });
+
+                  const fastTickets = Object.values(groupedMap);
+
+                  return fastTickets.map((ticket, idx) => {
+                    const currentWaiter = selectedWaiterByTicket[ticket.ticketKey] || defaultWaiterName;
+                    const totalQty = ticket.items.reduce((s, i) => s + Number(i.quantity || 1), 0);
+
+                    return (
+                      <div
+                        key={ticket.ticketKey}
+                        className="packed-ticket-card mb-2"
+                        style={{ borderTop: '3.5px solid #059669' }}
+                      >
+                        {/* Đỉnh thẻ: Số thứ tự + Tên bàn + Mã đơn + Giờ đặt */}
+                        <div className="packed-ticket-header" style={{ backgroundColor: '#ecfdf5' }}>
+                          <div className="d-flex justify-content-between align-items-center mb-1">
+                            <div className="d-flex align-items-center gap-1 flex-wrap">
+                              <span className="seq-pill" style={{ backgroundColor: '#059669' }}>
+                                #{idx + 1}
+                              </span>
+                              <span className="fw-bolder text-dark" style={{ fontSize: '15px' }}>
+                                {ticket.tableName}
+                              </span>
+                              {ticket.isAddOnBatch && (
+                                <span className="badge bg-warning text-dark fw-bold" style={{ fontSize: '9.5px', padding: '2px 5px' }}>
+                                  +Gọi thêm (L{ticket.batchNumber})
+                                </span>
+                              )}
+                            </div>
+                            <span
+                              className="badge rounded-pill fw-bold d-flex align-items-center gap-1"
+                              style={{ backgroundColor: '#d1fae5', color: '#047857', fontSize: '10.5px', padding: '2px 7px' }}
+                            >
+                              <Clock size={10} /> {ticket.elapsedLabel}
+                            </span>
+                          </div>
+
+                          <div className="d-flex justify-content-between align-items-center text-secondary" style={{ fontSize: '10.5px' }}>
+                            <span className="text-truncate">
+                              <b>{ticket.orderCode}</b> • Lúc {ticket.orderTimeText}
+                            </span>
+                            <span className="fw-bold text-success">{ticket.items.length} loại ({totalQty})</span>
+                          </div>
                         </div>
 
-                        <select
-                          value={currentWaiter}
-                          onChange={(e) => setSelectedWaiterByTicket({ ...selectedWaiterByTicket, [fastKey]: e.target.value })}
-                          className="form-select form-select-sm fw-bold text-dark mb-2 rounded-1"
-                          style={{ fontSize: '11.5px', height: '26px', padding: '1px 20px 1px 6px' }}
-                        >
-                          {staffList.map(st => (
-                            <option key={st.id} value={st.full_name}>
-                              NV: {st.full_name}
-                            </option>
+                        {/* Thân thẻ: Liệt kê gọn tất cả bia/nước ngọt của bàn đó */}
+                        <div className="packed-ticket-body">
+                          {ticket.items.map((item) => (
+                            <div key={item.id} className="packed-item-line">
+                              <div className="flex-grow-1 pe-1" style={{ minWidth: 0 }}>
+                                <div className="d-flex align-items-baseline gap-1">
+                                  <span className="fw-bolder text-danger flex-shrink-0" style={{ fontSize: '13.5px' }}>
+                                    {item.quantity}x
+                                  </span>
+                                  <span className="fw-bold text-dark" style={{ fontSize: '13px', lineHeight: '1.22', wordBreak: 'break-word' }}>
+                                    {item.product_name || item.name}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div className="d-flex align-items-center gap-1 flex-shrink-0">
+                                <button
+                                  onClick={(e) => openReportOutOfStockModal(e, item)}
+                                  className="btn-mini-out"
+                                  title="Báo hết món này"
+                                >
+                                  Hết
+                                </button>
+                                <button
+                                  onClick={() => handleAssignWaiterAndServe(ticket.ticketKey, ticket.tableName, [item], 'Quầy Bar')}
+                                  className="btn-mini-serve"
+                                  title="Giao lẻ món này"
+                                >
+                                  Giao
+                                </button>
+                              </div>
+                            </div>
                           ))}
-                        </select>
+                        </div>
 
-                        <div className="d-flex gap-1">
-                          <button onClick={(e) => openReportOutOfStockModal(e, item)} className="btn-mini-out">
-                            Hết
-                          </button>
+                        {/* Chân thẻ: 1 ô chọn Nhân viên + 1 nút Giao toàn bộ bia/nước ngọt của bàn */}
+                        <div className="packed-ticket-footer">
+                          <div className="d-flex align-items-center gap-1 mb-1">
+                            <UserCheck size={12} className="text-success flex-shrink-0" />
+                            <select
+                              value={currentWaiter}
+                              onChange={(e) => setSelectedWaiterByTicket({ ...selectedWaiterByTicket, [ticket.ticketKey]: e.target.value })}
+                              className="form-select form-select-sm fw-bold text-dark rounded-1 border-secondary-subtle"
+                              style={{ fontSize: '11.5px', height: '25px', padding: '1px 22px 1px 6px' }}
+                            >
+                              {staffList.map(st => (
+                                <option key={st.id} value={st.full_name}>
+                                  NV: {st.full_name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+
                           <button
-                            onClick={() => handleAssignWaiterAndServe(fastKey, item.tableName, [item], 'Quầy Bar')}
-                            className="btn btn-sm btn-success flex-fill rounded-1 fw-bold py-1"
-                            style={{ fontSize: '11.5px' }}
+                            onClick={() => handleAssignWaiterAndServe(ticket.ticketKey, ticket.tableName, ticket.items, 'Quầy Bar')}
+                            className="btn-packed-submit"
                           >
-                            ✓ Giao {currentWaiter}
+                            <Check size={13} /> Giao {currentWaiter} ({totalQty})
                           </button>
                         </div>
                       </div>
                     );
-                  })
-                )}
+                  });
+                })()}
               </div>
             </div>
 

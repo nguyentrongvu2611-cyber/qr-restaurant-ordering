@@ -11,6 +11,7 @@ from app.core.security import (
 from app.models.user import User
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication & Users"])
+
 # --- Schemas ---
 class LoginRequest(BaseModel):
     username: str

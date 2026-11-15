@@ -148,7 +148,7 @@ def get_all_orders(db: Session = Depends(get_db)):
                     "quantity": item.quantity,
                     "note": item.item_note,
                     "item_status": item.item_status,
-                    "unit_price": float(item.unit_price or 0) # <-- THÊM DÒNG NÀY ĐỂ FIX LỖI 0Đ
+                    "unit_price": float(item.unit_price or 0) 
                 } for item in o.items
             ]
             })
@@ -156,6 +156,7 @@ def get_all_orders(db: Session = Depends(get_db)):
     except Exception as e:
         print(f"Lỗi lấy danh sách orders: {e}")
         return []
+
 
 # ==========================================
 # 3. API LẤY LỊCH SỬ ĐẶT MÓN CỦA KHÁCH
@@ -210,3 +211,4 @@ def get_service_requests(db: Session = Depends(get_db)):
     except Exception as e:
         print(f"Lỗi lấy danh sách service requests: {e}")
         return []
+

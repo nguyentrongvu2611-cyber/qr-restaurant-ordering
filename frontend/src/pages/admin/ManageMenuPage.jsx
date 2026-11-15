@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import {
   FolderPlus, Plus, Trash2, Search, Utensils, Coffee,
   CheckCircle2, XCircle, Image as ImageIcon, Layers,
-  Edit3, EyeOff
+  Edit3, EyeOff, RotateCcw
 } from 'lucide-react';
 
 const API_BASE = 'http://127.0.0.1:8000';
@@ -10,9 +10,11 @@ const API_BASE = 'http://127.0.0.1:8000';
 export default function ManageMenuPage() {
   const [categories, setCategories] = useState([]);
   const [allProducts, setAllProducts] = useState([]);
+  const [hiddenProductIds, setHiddenProductIds] = useState([]);
   const [selectedCatId, setSelectedCatId] = useState(null);
 
   const [searchTerm, setSearchTerm] = useState('');
+  // 'ALL' | 'AVAILABLE' | 'OUT_OF_STOCK' | 'DELETED' (Xem thùng rác để khôi phục)
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [stationFilter, setStationFilter] = useState('ALL');
 
@@ -26,10 +28,11 @@ export default function ManageMenuPage() {
   });
 
   const getImageUrl = (url) => {
-  if (!url) return '';
-  if (url.startsWith('http://') || url.startsWith('https://')) return url;
-  return `${API_BASE}${url}`;
+    if (!url) return '';
+    if (url.startsWith('http://') || url.startsWith('https://')) return url;
+    return `${API_BASE}${url}`;
   };
+
   const [showProductForm, setShowProductForm] = useState(false);
   const [editingProdId, setEditingProdId] = useState(null);
   const [prodForm, setProdForm] = useState({
@@ -45,41 +48,53 @@ export default function ManageMenuPage() {
   const token = localStorage.getItem('access_token');
   const [uploadingImage, setUploadingImage] = useState(false);
 
-const handleImageUpload = async (e) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
+  const handleImageUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
 
-  setUploadingImage(true);
-  try {
-    const formData = new FormData();
-    formData.append('file', file);
+    setUploadingImage(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
 
-    const res = await fetch(`${API_BASE}/api/menu/upload-image`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-      body: formData,
-    });
+      const res = await fetch(`${API_BASE}/api/menu/upload-image`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      });
 
-    if (res.ok) {
-      const data = await res.json();
-      setProdForm((prev) => ({ ...prev, image_url: data.image_url }));
-    } else {
-      const err = await res.json();
-      alert(err.detail || 'Tải ảnh thất bại');
+      if (res.ok) {
+        const data = await res.json();
+        setProdForm((prev) => ({ ...prev, image_url: data.image_url }));
+      } else {
+        const err = await res.json();
+        alert(err.detail || 'Tải ảnh thất bại');
+      }
+    } catch (err) {
+      console.error('Lỗi upload ảnh:', err);
+      alert('Không thể kết nối server để tải ảnh');
+    } finally {
+      setUploadingImage(false);
     }
-  } catch (err) {
-    console.error('Lỗi upload ảnh:', err);
-    alert('Không thể kết nối server để tải ảnh');
-  } finally {
-    setUploadingImage(false);
-  }
-};
+  };
+
   const fetchAllData = async () => {
     try {
-      const [catRes, prodRes] = await Promise.all([
+      const [catRes, prodRes, hiddenRes] = await Promise.all([
         fetch(`${API_BASE}/api/menu/categories`, { headers: { Authorization: `Bearer ${token}` } }),
         fetch(`${API_BASE}/api/menu/products`, { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(`${API_BASE}/api/kitchen/hidden-products`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => null),
       ]);
+
+      let serverHiddenIds = [];
+      if (hiddenRes && hiddenRes.ok) {
+        const hData = await hiddenRes.json();
+        serverHiddenIds = hData.hidden_ids || [];
+      }
+      const localHiddenIds = JSON.parse(localStorage.getItem('pos_hidden_product_ids') || '[]');
+      const mergedHiddenIds = Array.from(new Set([...serverHiddenIds, ...localHiddenIds].map(Number)));
+      setHiddenProductIds(mergedHiddenIds);
+
       if (catRes.ok) {
         const catData = await catRes.json();
         setCategories(catData);
@@ -89,7 +104,8 @@ const handleImageUpload = async (e) => {
       }
       if (prodRes.ok) {
         const prodData = await prodRes.json();
-        setAllProducts(prodData);
+        const rawList = Array.isArray(prodData) ? prodData : (prodData.items || []);
+        setAllProducts(rawList);
       }
     } catch (err) {
       console.error('Lỗi tải dữ liệu thực đơn:', err);
@@ -242,23 +258,110 @@ const handleImageUpload = async (e) => {
     if (res.ok) fetchAllData();
   };
 
-  const handleDeleteProduct = async (prodId) => {
-    if (!window.confirm('Xóa món này khỏi thực đơn?')) return;
-    const res = await fetch(`${API_BASE}/api/menu/products/${prodId}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${token}` },
+  // ẨN MÓN VÀO THÙNG RÁC (CÓ THỂ KHÔI PHỤC LẠI BẤT CỨ LÚC NÀO)
+  const handleDeleteProduct = async (productId, productName = 'món này') => {
+    if (!window.confirm(`Đưa "${productName}" vào danh sách Ẩn (Thùng rác)?\nBạn có thể bấm chọn bộ lọc [🗑️ Đã xóa] để khôi phục lại bất cứ lúc nào.`)) {
+      return;
+    }
+
+    const numId = Number(productId);
+    const nextHiddenIds = Array.from(new Set([...hiddenProductIds, numId]));
+    setHiddenProductIds(nextHiddenIds);
+    localStorage.setItem('pos_hidden_product_ids', JSON.stringify(nextHiddenIds));
+
+    if (productName && productName !== 'món này') {
+      const hiddenNames = JSON.parse(localStorage.getItem('pos_hidden_product_names') || '[]');
+      if (!hiddenNames.includes(productName)) {
+        hiddenNames.push(productName);
+        localStorage.setItem('pos_hidden_product_names', JSON.stringify(hiddenNames));
+      }
+    }
+
+    await fetch(`${API_BASE}/api/kitchen/hide-product/${numId}`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${token}` }
+    }).catch(() => null);
+
+    const bc = new BroadcastChannel('smartpos_channel');
+    bc.postMessage({
+      type: 'PRODUCT_HIDDEN_FROM_MENU',
+      payload: { product_id: numId, product_name: productName }
     });
-    if (res.ok) fetchAllData();
+    bc.close();
   };
 
-  const availableCount = allProducts.filter((p) => p.is_available).length;
-  const outOfStockCount = allProducts.length - availableCount;
+  // KHÔI PHỤC MÓN ĐÃ XÓA TRỞ LẠI MENU
+  const handleRestoreProduct = async (productId, productName = '') => {
+    const numId = Number(productId);
+    const nextHiddenIds = hiddenProductIds.filter((id) => Number(id) !== numId);
+    setHiddenProductIds(nextHiddenIds);
+    localStorage.setItem('pos_hidden_product_ids', JSON.stringify(nextHiddenIds));
+
+    if (productName) {
+      const hiddenNames = JSON.parse(localStorage.getItem('pos_hidden_product_names') || '[]');
+      localStorage.setItem(
+        'pos_hidden_product_names',
+        JSON.stringify(hiddenNames.filter((n) => n !== productName))
+      );
+    }
+
+    await fetch(`${API_BASE}/api/kitchen/unhide-product/${numId}`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${token}` }
+    }).catch(() => null);
+
+    const bc = new BroadcastChannel('smartpos_channel');
+    bc.postMessage({
+      type: 'PRODUCT_RESTORED',
+      payload: { product_id: numId, product_name: productName }
+    });
+    bc.close();
+
+    if (nextHiddenIds.length === 0 && statusFilter === 'DELETED') {
+      setStatusFilter('ALL');
+    }
+  };
+
+  // KHÔI PHỤC TẤT CẢ MÓN ĐÃ XÓA
+  const handleRestoreAllProducts = async () => {
+    setHiddenProductIds([]);
+    localStorage.setItem('pos_hidden_product_ids', JSON.stringify([]));
+    localStorage.setItem('pos_hidden_product_names', JSON.stringify([]));
+
+    await fetch(`${API_BASE}/api/kitchen/unhide-all-products`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${token}` }
+    }).catch(() => null);
+
+    const bc = new BroadcastChannel('smartpos_channel');
+    bc.postMessage({ type: 'PRODUCT_RESTORED', payload: { restore_all: true } });
+    bc.close();
+
+    setStatusFilter('ALL');
+  };
+
+  // Tách danh sách món đang hiển thị và món đang nằm trong thùng rác
+  const activeMenuProducts = allProducts.filter((p) => !hiddenProductIds.includes(Number(p.id)));
+  const deletedTrashProducts = allProducts.filter((p) => hiddenProductIds.includes(Number(p.id)));
+
+  const availableCount = activeMenuProducts.filter((p) => p.is_available).length;
+  const outOfStockCount = activeMenuProducts.length - availableCount;
 
   const displayedProducts = allProducts.filter((p) => {
+    const isHidden = hiddenProductIds.includes(Number(p.id));
+
+    // Nếu đang chọn xem Thùng rác ('DELETED') thì chỉ hiện các món đã xóa
+    if (statusFilter === 'DELETED') {
+      if (!isHidden) return false;
+    } else {
+      // Ở các chế độ bình thường thì ẩn các món đã xóa đi
+      if (isHidden) return false;
+    }
+
     const matchCat = selectedCatId ? p.category_id === selectedCatId : true;
     const matchSearch = p.name.toLowerCase().includes(searchTerm.toLowerCase());
     const matchStatus =
-      statusFilter === 'ALL'
+      statusFilter === 'ALL' || statusFilter === 'DELETED'
         ? true
         : statusFilter === 'AVAILABLE'
         ? p.is_available
@@ -283,8 +386,8 @@ const handleImageUpload = async (e) => {
         <div className="col-6 col-md-3">
           <div className="p-3 bg-light rounded-4 border d-flex justify-content-between align-items-center">
             <div>
-              <div className="text-muted small">Tổng món thực đơn</div>
-              <div className="fw-bold fs-5 text-dark">{allProducts.length} món</div>
+              <div className="text-muted small">Tổng món hiển thị</div>
+              <div className="fw-bold fs-5 text-dark">{activeMenuProducts.length} món</div>
             </div>
             <Utensils size={22} className="text-primary" />
           </div>
@@ -363,39 +466,39 @@ const handleImageUpload = async (e) => {
                 </div>
 
                 <div className="mb-3">
-  <label className="form-label small fw-semibold text-secondary">Mô tả ngắn</label>
-  <input
-    type="text"
-    placeholder="Chọn nhanh gợi ý bên dưới hoặc tự nhập..."
-    value={catForm.description}
-    onChange={(e) => setCatForm({ ...catForm, description: e.target.value })}
-    className="form-control form-control-sm rounded-3 py-2 mb-2"
-  />
-  <div className="d-flex flex-wrap gap-1">
-    {[
-      'Phục vụ nóng trong 15–20 phút',
-      'Món đặc trưng bán chạy nhất quán',
-      'Chế biến tươi mới ngay khi gọi',
-      'Dành cho nhóm 2–6 người',
-      'Pha chế tươi mát tại quầy Bar',
-      'Phục vụ lạnh ngay sau 5 phút',
-    ].map((preset, idx) => (
-      <button
-        key={idx}
-        type="button"
-        onClick={() => setCatForm({ ...catForm, description: preset })}
-        className={`btn btn-sm rounded-pill py-0 px-2 border ${
-          catForm.description === preset
-            ? 'btn-primary text-white'
-            : 'btn-light text-secondary'
-        }`}
-        style={{ fontSize: '11px' }}
-      >
-        {preset}
-      </button>
-    ))}
-  </div>
-</div>
+                  <label className="form-label small fw-semibold text-secondary">Mô tả ngắn</label>
+                  <input
+                    type="text"
+                    placeholder="Chọn nhanh gợi ý bên dưới hoặc tự nhập..."
+                    value={catForm.description}
+                    onChange={(e) => setCatForm({ ...catForm, description: e.target.value })}
+                    className="form-control form-control-sm rounded-3 py-2 mb-2"
+                  />
+                  <div className="d-flex flex-wrap gap-1">
+                    {[
+                      'Phục vụ nóng trong 15–20 phút',
+                      'Món đặc trưng bán chạy nhất quán',
+                      'Chế biến tươi mới ngay khi gọi',
+                      'Dành cho nhóm 2–6 người',
+                      'Pha chế tươi mát tại quầy Bar',
+                      'Phục vụ lạnh ngay sau 5 phút',
+                    ].map((preset, idx) => (
+                      <button
+                        key={idx}
+                        type="button"
+                        onClick={() => setCatForm({ ...catForm, description: preset })}
+                        className={`btn btn-sm rounded-pill py-0 px-2 border ${
+                          catForm.description === preset
+                            ? 'btn-primary text-white'
+                            : 'btn-light text-secondary'
+                        }`}
+                        style={{ fontSize: '11px' }}
+                      >
+                        {preset}
+                      </button>
+                    ))}
+                  </div>
+                </div>
 
                 <div className="form-check form-switch mb-3">
                   <input
@@ -438,7 +541,7 @@ const handleImageUpload = async (e) => {
                   }`}
                 >
                   <span>Tất cả món trong thực đơn</span>
-                  <span className="badge bg-secondary rounded-pill">{allProducts.length}</span>
+                  <span className="badge bg-secondary rounded-pill">{activeMenuProducts.length}</span>
                 </button>
 
                 {categories.length === 0 ? (
@@ -514,20 +617,44 @@ const handleImageUpload = async (e) => {
               <div className="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-3">
                 <div>
                   <h5 className="fw-bold mb-0">
-                    {selectedCatId
+                    {statusFilter === 'DELETED'
+                      ? `🗑️ Thùng rác: Các món đã ẩn (${deletedTrashProducts.length})`
+                      : selectedCatId
                       ? `Danh mục: ${categories.find((c) => c.id === selectedCatId)?.name}`
                       : 'Tất cả Món ăn & Đồ uống'}
                   </h5>
                   <small className="text-muted">Quản lý giá bán, hình ảnh và trạng thái phục vụ trực tiếp trên MySQL</small>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={openAddProductForm}
-                  className="btn btn-primary btn-sm d-flex align-items-center gap-1 px-3 py-2 rounded-3 fw-semibold"
-                >
-                  <Plus size={16} /> Thêm Món Mới
-                </button>
+                <div className="d-flex align-items-center gap-2">
+                  {deletedTrashProducts.length > 0 && statusFilter !== 'DELETED' && (
+                    <button
+                      type="button"
+                      onClick={() => setStatusFilter('DELETED')}
+                      className="btn btn-warning btn-sm d-flex align-items-center gap-1 px-3 py-2 rounded-3 fw-semibold"
+                    >
+                      <RotateCcw size={15} /> Món đã xóa ({deletedTrashProducts.length})
+                    </button>
+                  )}
+
+                  {statusFilter === 'DELETED' && deletedTrashProducts.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={handleRestoreAllProducts}
+                      className="btn btn-success btn-sm d-flex align-items-center gap-1 px-3 py-2 rounded-3 fw-semibold"
+                    >
+                      <RotateCcw size={15} /> Khôi phục tất cả
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={openAddProductForm}
+                    className="btn btn-primary btn-sm d-flex align-items-center gap-1 px-3 py-2 rounded-3 fw-semibold"
+                  >
+                    <Plus size={16} /> Thêm Món Mới
+                  </button>
+                </div>
               </div>
 
               <div className="d-flex flex-wrap align-items-center gap-2 mb-4 bg-light p-2.5 rounded-3 border">
@@ -548,11 +675,12 @@ const handleImageUpload = async (e) => {
                   value={statusFilter}
                   onChange={(e) => setStatusFilter(e.target.value)}
                   className="form-select form-select-sm bg-white"
-                  style={{ width: '160px' }}
+                  style={{ width: '195px' }}
                 >
-                  <option value="ALL">Trạng thái: Tất cả</option>
+                  <option value="ALL">Trạng thái: Tất cả đang bán</option>
                   <option value="AVAILABLE">✅ Đang còn món</option>
                   <option value="OUT_OF_STOCK">⛔ Tạm hết hàng</option>
+                  <option value="DELETED">🗑️ Đã xóa ({deletedTrashProducts.length})</option>
                 </select>
 
                 <select
@@ -613,29 +741,29 @@ const handleImageUpload = async (e) => {
                       </select>
                     </div>
                     <div className="col-md-6">
-  <label className="form-label small fw-semibold">Hình ảnh món ăn (Chọn từ máy)</label>
-  <div className="d-flex gap-2 align-items-center">
-    <input
-      key={editingProdId || 'new'}
-      type="file"
-      accept="image/*"
-      onChange={handleImageUpload}
-      disabled={uploadingImage}
-      className="form-control form-control-sm"
-    />
-    {uploadingImage && (
-      <span className="spinner-border spinner-border-sm text-primary" role="status"></span>
-    )}
-    {prodForm.image_url && !uploadingImage && (
-      <img
-        src={getImageUrl(prodForm.image_url)}
-        alt="Preview"
-        className="rounded border object-fit-cover flex-shrink-0"
-        style={{ width: '36px', height: '36px' }}
-      />
-    )}
-  </div>
-</div>
+                      <label className="form-label small fw-semibold">Hình ảnh món ăn (Chọn từ máy)</label>
+                      <div className="d-flex gap-2 align-items-center">
+                        <input
+                          key={editingProdId || 'new'}
+                          type="file"
+                          accept="image/*"
+                          onChange={handleImageUpload}
+                          disabled={uploadingImage}
+                          className="form-control form-control-sm"
+                        />
+                        {uploadingImage && (
+                          <span className="spinner-border spinner-border-sm text-primary" role="status"></span>
+                        )}
+                        {prodForm.image_url && !uploadingImage && (
+                          <img
+                            src={getImageUrl(prodForm.image_url)}
+                            alt="Preview"
+                            className="rounded border object-fit-cover flex-shrink-0"
+                            style={{ width: '36px', height: '36px' }}
+                          />
+                        )}
+                      </div>
+                    </div>
                     <div className="col-md-6">
                       <label className="form-label small fw-semibold">Mô tả thành phần / ghi chú</label>
                       <input
@@ -677,93 +805,117 @@ const handleImageUpload = async (e) => {
                     {displayedProducts.length === 0 ? (
                       <tr>
                         <td colSpan="5" className="text-center text-muted py-5">
-                          Chưa có món nào trong MySQL. Tạo danh mục bên trái rồi bấm <b>+ Thêm Món Mới</b>.
+                          {statusFilter === 'DELETED' ? (
+                            <span>Thùng rác hiện đang trống. Không có món nào bị ẩn.</span>
+                          ) : (
+                            <span>Chưa có món nào trong danh sách. Tạo danh mục bên trái rồi bấm <b>+ Thêm Món Mới</b>.</span>
+                          )}
                         </td>
                       </tr>
                     ) : (
-                      displayedProducts.map((p) => (
-                        <tr key={p.id}>
-                          <td>
-                            <div className="d-flex align-items-center gap-3">
-                              {p.image_url ? (
-                                <img
-                                  src={getImageUrl(p.image_url)}
-                                  alt={p.name}
-                                  className="rounded-3 object-fit-cover border"
-                                  style={{ width: '48px', height: '48px' }}
-                                />
-                              ) : (
-                                <div
-                                  className="rounded-3 bg-light border d-flex align-items-center justify-content-center text-muted"
-                                  style={{ width: '48px', height: '48px', flexShrink: 0 }}
-                                >
-                                  <ImageIcon size={18} />
-                                </div>
-                              )}
-                              <div>
-                                <div className="fw-semibold text-dark">{p.name}</div>
-                                <div className="text-muted" style={{ fontSize: '12px' }}>
-                                  {p.description || 'Không có mô tả'}
+                      displayedProducts.map((p) => {
+                        const isHidden = hiddenProductIds.includes(Number(p.id));
+                        return (
+                          <tr key={p.id}>
+                            <td>
+                              <div className="d-flex align-items-center gap-3">
+                                {p.image_url ? (
+                                  <img
+                                    src={getImageUrl(p.image_url)}
+                                    alt={p.name}
+                                    className="rounded-3 object-fit-cover border"
+                                    style={{ width: '48px', height: '48px' }}
+                                  />
+                                ) : (
+                                  <div
+                                    className="rounded-3 bg-light border d-flex align-items-center justify-content-center text-muted"
+                                    style={{ width: '48px', height: '48px', flexShrink: 0 }}
+                                  >
+                                    <ImageIcon size={18} />
+                                  </div>
+                                )}
+                                <div>
+                                  <div className="fw-semibold text-dark">{p.name}</div>
+                                  <div className="text-muted" style={{ fontSize: '12px' }}>
+                                    {p.description || 'Không có mô tả'}
+                                  </div>
                                 </div>
                               </div>
-                            </div>
-                          </td>
-                          <td>
-                            <div className="d-flex flex-column gap-1 align-items-start">
-                              <span className="badge bg-primary-subtle text-primary">
-                                {p.category_name || 'Chưa phân loại'}
-                              </span>
-                              <span className="text-muted" style={{ fontSize: '11px' }}>
-                                {p.station === 'BAR' ? '🍹 Quầy Bar' : '👨‍🍳 Bếp nấu'}
-                              </span>
-                            </div>
-                          </td>
-                          <td className="fw-bold text-dark">
-                            {p.price.toLocaleString('vi-VN')}đ
-                          </td>
-                          <td>
-                            <button
-                              type="button"
-                              onClick={() => handleToggleProduct(p.id)}
-                              className={`btn btn-sm rounded-pill px-3 py-1 d-inline-flex align-items-center gap-1 border-0 ${
-                                p.is_available
-                                  ? 'bg-success-subtle text-success fw-semibold'
-                                  : 'bg-danger-subtle text-danger fw-semibold'
-                              }`}
-                            >
-                              {p.is_available ? (
-                                <>
-                                  <CheckCircle2 size={14} /> Còn món
-                                </>
+                            </td>
+                            <td>
+                              <div className="d-flex flex-column gap-1 align-items-start">
+                                <span className="badge bg-primary-subtle text-primary">
+                                  {p.category_name || 'Chưa phân loại'}
+                                </span>
+                                <span className="text-muted" style={{ fontSize: '11px' }}>
+                                  {p.station === 'BAR' ? '🍹 Quầy Bar' : '👨‍🍳 Bếp nấu'}
+                                </span>
+                              </div>
+                            </td>
+                            <td className="fw-bold text-dark">
+                              {p.price.toLocaleString('vi-VN')}đ
+                            </td>
+                            <td>
+                              {isHidden ? (
+                                <span className="badge bg-secondary text-white rounded-pill px-3 py-1">
+                                  Đã ẩn khỏi Menu
+                                </span>
                               ) : (
-                                <>
-                                  <XCircle size={14} /> Hết món
-                                </>
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleProduct(p.id)}
+                                  className={`btn btn-sm rounded-pill px-3 py-1 d-inline-flex align-items-center gap-1 border-0 ${
+                                    p.is_available
+                                      ? 'bg-success-subtle text-success fw-semibold'
+                                      : 'bg-danger-subtle text-danger fw-semibold'
+                                  }`}
+                                >
+                                  {p.is_available ? (
+                                    <>
+                                      <CheckCircle2 size={14} /> Còn món
+                                    </>
+                                  ) : (
+                                    <>
+                                      <XCircle size={14} /> Hết món
+                                    </>
+                                  )}
+                                </button>
                               )}
-                            </button>
-                          </td>
-                          <td className="text-end">
-                            <div className="d-inline-flex gap-1">
-                              <button
-                                type="button"
-                                onClick={() => openEditProductForm(p)}
-                                className="btn btn-sm btn-outline-secondary rounded-3"
-                                title="Sửa món"
-                              >
-                                <Edit3 size={14} />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleDeleteProduct(p.id)}
-                                className="btn btn-sm btn-outline-danger rounded-3"
-                                title="Xóa món"
-                              >
-                                <Trash2 size={14} />
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))
+                            </td>
+                            <td className="text-end">
+                              {isHidden ? (
+                                <button
+                                  type="button"
+                                  onClick={() => handleRestoreProduct(p.id, p.name)}
+                                  className="btn btn-sm btn-success rounded-3 fw-semibold d-inline-flex align-items-center gap-1"
+                                  title="Khôi phục món này về lại Thực đơn"
+                                >
+                                  <RotateCcw size={14} /> Khôi phục
+                                </button>
+                              ) : (
+                                <div className="d-inline-flex gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => openEditProductForm(p)}
+                                    className="btn btn-sm btn-outline-secondary rounded-3"
+                                    title="Sửa món"
+                                  >
+                                    <Edit3 size={14} />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteProduct(p.id, p.name)}
+                                    className="btn btn-sm btn-outline-danger rounded-3"
+                                    title="Ẩn món khỏi Menu"
+                                  >
+                                    <Trash2 size={14} />
+                                  </button>
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })
                     )}
                   </tbody>
                 </table>

@@ -9,8 +9,10 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 engine = create_engine(
     DATABASE_URL,
-    pool_pre_ping=True,
-    pool_recycle=3600
+    pool_size=30,        # Giữ sẵn 30 kết nối
+    max_overflow=50,     # Cho phép vượt ngưỡng thêm 50 kết nối (tổng 80 luồng đồng thời)
+    pool_timeout=30,
+    pool_pre_ping=True
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

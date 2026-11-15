@@ -1,11 +1,13 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
-  RefreshCw, CheckCircle2, Bell, Utensils,
+  RefreshCw, CheckCircle2, Utensils,
   QrCode, User, Home, AlertTriangle, Check, BookOpen, LogOut,
-  Repeat, Ban, Eye, X
+  Repeat, Ban, X, Plus, Minus, Trash2, Search, ChevronRight,
+  IdCard, Lock, FileText, MessageSquare, Bell, BarChart3, Eye
 } from 'lucide-react';
 
 const API_BASE = 'http://127.0.0.1:8000';
+const MAX_PREVIEW_ITEMS = 3; // Chỉ hiển thị tối đa 3 món trên thẻ ngoài, bấm vào mở Popup xem hết
 
 export default function StaffDashboard() {
   const [bottomNav, setBottomNav] = useState('HOME'); // 'HOME' | 'MENU' | 'PROFILE'
@@ -13,44 +15,163 @@ export default function StaffDashboard() {
   const [orders, setOrders] = useState([]);
   const [tables, setTables] = useState([]);
   const [menuProducts, setMenuProducts] = useState([]);
+  const [staffProfileInfo, setStaffProfileInfo] = useState(null);
   const [loading, setLoading] = useState(false);
 
-  // Danh sách tên món bị Bếp báo hết & danh sách dòng order_item bị báo hết
+  const [menuSearch, setMenuSearch] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState('Tất cả');
+
+  // Trạng thái bật/tắt thông báo trên trang Cá nhân (Giống Ảnh 4)
+  const [notifyEnabled, setNotifyEnabled] = useState(() => localStorage.getItem('staff_notify_enabled') !== 'false');
+  // Popup chi tiết cho các mục trong trang Cá nhân: 'INFO' | 'STATS' | 'PASSWORD' | 'SOP' | 'FEEDBACK' | null
+  const [profileSubModal, setProfileSubModal] = useState(null);
+  const [pwdForm, setPwdForm] = useState({ oldPwd: '', newPwd: '', confirmPwd: '' });
+  const [feedbackText, setFeedbackText] = useState('');
+
   const [outOfStockNames, setOutOfStockNames] = useState(() => {
     try { return JSON.parse(localStorage.getItem('pos_out_of_stock_names') || '[]'); } catch { return []; }
   });
   const [rejectedItemIds, setRejectedItemIds] = useState(() => {
     try { return JSON.parse(localStorage.getItem('pos_rejected_item_ids') || '[]'); } catch { return []; }
   });
-  // Danh sách các món Nhân viên đã bấm "Báo Thu ngân hủy" (đang chờ Thu ngân xác nhận)
   const [requestedCancelIds, setRequestedCancelIds] = useState(() => {
     try { return JSON.parse(localStorage.getItem('pos_staff_cancel_requests') || '[]').map(r => r.item_id); } catch { return []; }
   });
 
-  // Xem chi tiết Order của 1 bàn khi nhân viên bấm vào bàn
+  // Popup 1: Xem & Sửa chi tiết Order của 1 bàn (hoặc khi bấm vào đơn dài ở tab Chờ duyệt)
   const [viewingTable, setViewingTable] = useState(null);
-  // Modal Đổi món cho khách khi món cũ bị hết
+  // Popup 2: Đổi món cho khách
   const [swappingItem, setSwappingItem] = useState(null);
+  const [swapSearch, setSwapSearch] = useState('');
+  // Popup 3: Thêm món mới vào Đơn hoặc Bàn
+  const [addingToTarget, setAddingToTarget] = useState(null);
+  const [addSearch, setAddSearch] = useState('');
+  const [addCategory, setAddCategory] = useState('Tất cả');
+  // Popup 4: Xác nhận xóa món
+  const [confirmDeletePopup, setConfirmDeletePopup] = useState(null);
 
   const [serviceRequests, setServiceRequests] = useState([]);
-  const [readyToast, setReadyToast] = useState(null);
+  const [staffToast, setStaffToast] = useState(null);
 
   const token = localStorage.getItem('access_token');
   const staffName = localStorage.getItem('full_name') || 'Nguyễn Trọng Vũ';
 
+  const showToast = (text) => {
+    setStaffToast(text);
+    setTimeout(() => setStaffToast(null), 2600);
+  };
+
+  const handleToggleNotify = () => {
+    const next = !notifyEnabled;
+    setNotifyEnabled(next);
+    localStorage.setItem('staff_notify_enabled', String(next));
+    showToast(next ? 'Đã bật thông báo & âm báo đơn mới' : 'Đã tắt âm báo đơn mới');
+  };
+
+  const getProductImageUrl = (prodOrUrl) => {
+    const rawUrl = typeof prodOrUrl === 'string'
+      ? prodOrUrl
+      : (prodOrUrl?.image_url || prodOrUrl?.image || prodOrUrl?.thumbnail);
+    if (!rawUrl) return 'https://placehold.co/200x200/e2e8f0/475569?text=Mon+An';
+    if (rawUrl.startsWith('http://') || rawUrl.startsWith('https://')) return rawUrl;
+    return `${API_BASE}${rawUrl.startsWith('/') ? '' : '/'}${rawUrl}`;
+  };
+
+  const productLookupMap = useMemo(() => {
+    const byId = {};
+    const byName = {};
+    menuProducts.forEach(p => {
+      byId[p.id] = p;
+      if (p.name) byName[p.name.toLowerCase().trim()] = p;
+    });
+    return { byId, byName };
+  }, [menuProducts]);
+
+  const getItemImage = (item) => {
+    if (item?.image_url) return getProductImageUrl(item.image_url);
+    const pid = item?.product_id || item?.menu_item_id;
+    if (pid && productLookupMap.byId[pid]) {
+      return getProductImageUrl(productLookupMap.byId[pid]);
+    }
+    const nameKey = String(item?.product_name || item?.name || '').toLowerCase().trim();
+    if (nameKey && productLookupMap.byName[nameKey]) {
+      return getProductImageUrl(productLookupMap.byName[nameKey]);
+    }
+    return 'https://placehold.co/200x200/e2e8f0/475569?text=Mon+An';
+  };
+
+  const getItemUnitPrice = (item) => {
+    const rawPrice = Number(item?.unit_price || item?.price || 0);
+    if (rawPrice > 0) return rawPrice;
+    const pid = item?.product_id || item?.menu_item_id;
+    if (pid && productLookupMap.byId[pid]) return Number(productLookupMap.byId[pid].price || 0);
+    const nameKey = String(item?.product_name || item?.name || '').toLowerCase().trim();
+    if (nameKey && productLookupMap.byName[nameKey]) return Number(productLookupMap.byName[nameKey].price || 0);
+    return 0;
+  };
+
   const fetchData = async () => {
     setLoading(true);
     try {
-      const [resOrders, resTables, resProducts] = await Promise.all([
+      const [resOrders, resTables, resProducts, resHidden, resStaffUsers, resCalls] = await Promise.all([
         fetch(`${API_BASE}/api/orders`, { headers: { Authorization: `Bearer ${token}` } }),
         fetch(`${API_BASE}/api/tables`, { headers: { Authorization: `Bearer ${token}` } }),
-        fetch(`${API_BASE}/api/products`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => null)
+        fetch(`${API_BASE}/api/products`, { headers: { Authorization: `Bearer ${token}` } })
+          .then(r => (r && r.ok ? r : fetch(`${API_BASE}/api/menu/products`, { headers: { Authorization: `Bearer ${token}` } })))
+          .catch(() => null),
+        fetch(`${API_BASE}/api/kitchen/hidden-products`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => null),
+        fetch(`${API_BASE}/api/kitchen/staff-users`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => null),
+        fetch(`${API_BASE}/api/kitchen/live-alerts-v2`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => null)
       ]);
+
       if (resOrders.ok) setOrders(await resOrders.json());
       if (resTables.ok) setTables(await resTables.json());
-      if (resProducts && resProducts.ok) setMenuProducts(await resProducts.json());
 
-      setOutOfStockNames(JSON.parse(localStorage.getItem('pos_out_of_stock_names') || '[]'));
+      if (resCalls && resCalls.ok) {
+        const cData = await resCalls.json();
+        setServiceRequests(cData.calls || []);
+      }
+
+      if (resStaffUsers && resStaffUsers.ok) {
+        const sList = await resStaffUsers.json();
+        if (Array.isArray(sList) && sList.length > 0) {
+          const matched = sList.find(u => u.full_name === staffName) || sList[0];
+          setStaffProfileInfo(matched);
+        }
+      }
+
+      let serverHiddenIds = [];
+      if (resHidden && resHidden.ok) {
+        const hData = await resHidden.json();
+        serverHiddenIds = hData.hidden_ids || [];
+      }
+      const localHiddenIds = JSON.parse(localStorage.getItem('pos_hidden_product_ids') || '[]');
+      const localHiddenNames = JSON.parse(localStorage.getItem('pos_hidden_product_names') || '[]');
+      const allHiddenIds = new Set([...serverHiddenIds, ...localHiddenIds].map(Number));
+
+      
+      if (resProducts && resProducts.ok) {
+        const prodData = await resProducts.json();
+        const rawList = Array.isArray(prodData) ? prodData : (prodData.items || []);
+
+        const visibleProducts = rawList.filter(
+          p => !allHiddenIds.has(Number(p.id)) && !localHiddenNames.includes(p.name) && p.is_deleted !== true
+        );
+        setMenuProducts(visibleProducts);
+
+        const dbAvailNames = new Set(
+          visibleProducts.filter(p => p.is_available === true || p.is_available === 1).map(p => p.name)
+        );
+        const savedOut = JSON.parse(localStorage.getItem('pos_out_of_stock_names') || '[]');
+        const cleanedOut = savedOut.filter(n => !dbAvailNames.has(n));
+        if (cleanedOut.length !== savedOut.length) {
+          localStorage.setItem('pos_out_of_stock_names', JSON.stringify(cleanedOut));
+        }
+        setOutOfStockNames(cleanedOut);
+      } else {
+        setOutOfStockNames(JSON.parse(localStorage.getItem('pos_out_of_stock_names') || '[]'));
+      }
+
       setRejectedItemIds(JSON.parse(localStorage.getItem('pos_rejected_item_ids') || '[]'));
       setRequestedCancelIds(JSON.parse(localStorage.getItem('pos_staff_cancel_requests') || '[]').map(r => r.item_id));
     } catch (e) {
@@ -72,7 +193,14 @@ export default function StaffDashboard() {
         setRejectedItemIds(JSON.parse(localStorage.getItem('pos_rejected_item_ids') || '[]'));
         fetchData();
       }
-      if (type === 'CASHIER_CONFIRMED_CANCEL' || type === 'TABLE_CANCELLED') {
+      if (
+        type === 'PRODUCT_HIDDEN_FROM_MENU' ||
+        type === 'PRODUCT_RESTORED' ||
+        type === 'CASHIER_CONFIRMED_CANCEL' ||
+        type === 'TABLE_CANCELLED' ||
+        type === 'ORDER_CONFIRMED' ||
+        type === 'EXPO_SERVED'
+      ) {
         fetchData();
       }
       if (type === 'CUSTOMER_CALL_SERVICE' && payload) {
@@ -84,6 +212,7 @@ export default function StaffDashboard() {
       setOutOfStockNames(JSON.parse(localStorage.getItem('pos_out_of_stock_names') || '[]'));
       setRejectedItemIds(JSON.parse(localStorage.getItem('pos_rejected_item_ids') || '[]'));
       setRequestedCancelIds(JSON.parse(localStorage.getItem('pos_staff_cancel_requests') || '[]').map(r => r.item_id));
+      fetchData();
     };
     window.addEventListener('storage', handleStorageChange);
 
@@ -94,7 +223,6 @@ export default function StaffDashboard() {
     };
   }, []);
 
-  // Kiểm tra 1 dòng món trong đơn có đang bị Bếp báo hết hay không
   const isItemOutOfStock = (item) => {
     const st = String(item.item_status || item.status || '').toLowerCase();
     const name = item.product_name || item.name;
@@ -102,7 +230,14 @@ export default function StaffDashboard() {
     return st === 'out_of_stock' || rejectedItemIds.includes(item.id) || outOfStockNames.includes(name);
   };
 
-  // Tìm TẤT CẢ các món đang bị Bếp báo hết trong các bàn đang hoạt động để hiện cố định trên màn hình Nhân viên
+  const isProductAvailable = (prod) => {
+    if (!prod) return false;
+    if (prod.is_available === true || prod.is_available === 1) {
+      return !outOfStockNames.includes(prod.name);
+    }
+    return prod.is_available !== false && prod.is_available !== 0 && !outOfStockNames.includes(prod.name);
+  };
+
   const outOfStockOrderItems = useMemo(() => {
     const list = [];
     orders.forEach(order => {
@@ -124,7 +259,64 @@ export default function StaffDashboard() {
     return list;
   }, [orders, outOfStockNames, rejectedItemIds]);
 
-  // 1. NHÂN VIÊN ĐỔI MÓN MỚI CHO KHÁCH (KHI MÓN CŨ HẾT HÀNG)
+  const handleStaffAdjustItemQty = async (item, delta, tableName = '') => {
+    const currentQty = Number(item.quantity || 1);
+    const nextQty = currentQty + delta;
+
+    if (nextQty <= 0) {
+      setConfirmDeletePopup({ item, tableName });
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/api/kitchen/items/${item.id}/quantity`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ quantity: nextQty })
+      });
+
+      if (res.ok) {
+        const bc = new BroadcastChannel('smartpos_channel');
+        bc.postMessage({ type: 'STAFF_SWAPPED_ITEM', payload: { item_id: item.id, quantity: nextQty } });
+        bc.close();
+        showToast(`Đã cập nhật: ${nextQty}x ${item.product_name || item.name}`);
+        await fetchData();
+      }
+    } catch (e) {
+      alert('Không thể cập nhật số lượng món!');
+    }
+  };
+
+  const executeDeleteWrongItem = async () => {
+    if (!confirmDeletePopup) return;
+    const { item } = confirmDeletePopup;
+    const itemName = item.product_name || item.name;
+
+    try {
+      const res = await fetch(`${API_BASE}/api/kitchen/items/${item.id}/cancel`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ reason: `Nhân viên ${staffName} xóa món khách gọi nhầm` })
+      });
+
+      if (res.ok) {
+        const nextRejected = rejectedItemIds.filter(id => id !== item.id);
+        localStorage.setItem('pos_rejected_item_ids', JSON.stringify(nextRejected));
+        setRejectedItemIds(nextRejected);
+
+        const bc = new BroadcastChannel('smartpos_channel');
+        bc.postMessage({ type: 'CASHIER_CONFIRMED_CANCEL', payload: { item_id: item.id } });
+        bc.close();
+
+        setConfirmDeletePopup(null);
+        showToast(`Đã xóa "${itemName}" khỏi đơn`);
+        await fetchData();
+      }
+    } catch (e) {
+      alert('Lỗi khi xóa món!');
+    }
+  };
+
   const handleConfirmSwapItem = async (newProduct) => {
     if (!swappingItem) return;
     try {
@@ -134,7 +326,6 @@ export default function StaffDashboard() {
         body: JSON.stringify({ new_product_id: newProduct.id })
       });
 
-      // Xóa ID dòng món đó khỏi danh sách rejected để trở lại bình thường với món mới
       const nextRejected = rejectedItemIds.filter(id => id !== swappingItem.id);
       localStorage.setItem('pos_rejected_item_ids', JSON.stringify(nextRejected));
       setRejectedItemIds(nextRejected);
@@ -150,6 +341,7 @@ export default function StaffDashboard() {
       });
       bc.close();
 
+      showToast(`Đã đổi sang món: ${newProduct.name}`);
       setSwappingItem(null);
       await fetchData();
     } catch (e) {
@@ -157,7 +349,56 @@ export default function StaffDashboard() {
     }
   };
 
-  // 2. NHÂN VIÊN BẤM "KHÁCH HỦY MÓN" -> GỬI YÊU CẦU CHO THU NGÂN XÁC NHẬN XÓA MÓN
+  const handleStaffAddProductToTarget = async (product) => {
+    if (!addingToTarget) return;
+    const { orderId, tableId, tableName } = addingToTarget;
+
+    try {
+      if (orderId) {
+        const res = await fetch(`${API_BASE}/api/kitchen/orders/${orderId}/add-item`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ product_id: product.id, quantity: 1 })
+        });
+
+        if (res.ok) {
+          const bc = new BroadcastChannel('smartpos_channel');
+          bc.postMessage({ type: 'STAFF_SWAPPED_ITEM', payload: { order_id: orderId } });
+          bc.close();
+          showToast(`Đã thêm +1 ${product.name} vào ${tableName}`);
+          await fetchData();
+          return;
+        }
+      }
+
+      if (tableId) {
+        const resCreate = await fetch(`${API_BASE}/api/kitchen/cashier-create-order`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            table_id: tableId,
+            status: 'confirmed',
+            items: [{ product_id: product.id, quantity: 1, price: product.price, unit_price: product.price }]
+          })
+        });
+
+        if (resCreate.ok) {
+          const data = await resCreate.json().catch(() => ({}));
+          if (data.order_id) {
+            setAddingToTarget(prev => ({ ...prev, orderId: data.order_id }));
+          }
+          const bc = new BroadcastChannel('smartpos_channel');
+          bc.postMessage({ type: 'CASHIER_CREATED_ORDER', payload: { table_id: tableId } });
+          bc.close();
+          showToast(`Đã thêm +1 ${product.name} cho ${tableName}`);
+          await fetchData();
+        }
+      }
+    } catch (e) {
+      alert('Không thể thêm món vào bàn!');
+    }
+  };
+
   const handleRequestCashierCancelItem = (item, tableName, orderCode) => {
     const reqObj = {
       req_id: `REQ-${Date.now()}`,
@@ -167,7 +408,7 @@ export default function StaffDashboard() {
       table_name: tableName,
       product_name: item.product_name || item.name,
       quantity: item.quantity || 1,
-      price: Number(item.unit_price || item.price || 0),
+      price: getItemUnitPrice(item),
       staff_name: staffName,
       reason: 'Món hết - Khách yêu cầu hủy món',
       timestamp: Date.now()
@@ -181,15 +422,14 @@ export default function StaffDashboard() {
     const bc = new BroadcastChannel('smartpos_channel');
     bc.postMessage({ type: 'STAFF_REQUEST_CANCEL_ITEM', payload: reqObj });
     bc.close();
+    showToast(`Đã gửi yêu cầu hủy món sang Thu ngân`);
   };
 
-  // Chỉ hiện đơn do Khách quét QR (không hiện đơn do Thu ngân nhập tay)
   const cashierAutoIds = JSON.parse(localStorage.getItem('pos_cashier_confirmed_orders') || '[]');
   const pendingOrders = orders.filter(
     o => String(o.status).toLowerCase() === 'pending' && !cashierAutoIds.includes(o.id)
   );
 
-  // Lọc các món Đã nấu xong (ready) chờ nhân viên bưng ra bàn
   const readyToServeList = [];
   orders.forEach(order => {
     if (['confirmed', 'cooking', 'preparing', 'ready'].includes(String(order.status).toLowerCase())) {
@@ -197,6 +437,7 @@ export default function StaffDashboard() {
         const st = String(item.item_status || item.status || '').toLowerCase();
         if (st === 'ready' || st === 'done') {
           readyToServeList.push({
+            ...item,
             id: item.id,
             orderId: order.id,
             orderCode: order.order_code || `ORD-${order.id}`,
@@ -210,16 +451,13 @@ export default function StaffDashboard() {
     }
   });
 
-  // Nhân viên bấm "Xác nhận đơn" -> Gọi vào API /api/kitchen/orders/{id}/confirm trong kitchen.py
   const handleConfirmOrder = async (orderId) => {
     try {
-      // 1. Gọi API mới trong kitchen.py (cập nhật cả Order lẫn từng dòng OrderItem sang 'confirmed')
       const res = await fetch(`${API_BASE}/api/kitchen/orders/${orderId}/confirm`, {
         method: 'PUT',
         headers: { Authorization: `Bearer ${token}` }
       });
 
-      // Fallback nếu cần
       if (!res.ok) {
         await fetch(`${API_BASE}/api/orders/${orderId}/status`, {
           method: 'PUT',
@@ -228,7 +466,6 @@ export default function StaffDashboard() {
         }).catch(() => null);
       }
 
-      // 2. Đánh dấu đơn đã được duyệt và báo sang màn hình Bếp + Thu ngân ngay lập tức
       const autoConfirmed = JSON.parse(localStorage.getItem('pos_cashier_confirmed_orders') || '[]');
       if (!autoConfirmed.includes(orderId)) {
         autoConfirmed.push(orderId);
@@ -239,6 +476,7 @@ export default function StaffDashboard() {
       bc.postMessage({ type: 'ORDER_CONFIRMED', payload: { order_id: orderId } });
       bc.close();
 
+      showToast('Đã xác nhận & chuyển đơn xuống Bếp/Bar!');
       await fetchData();
     } catch (e) {
       alert('Lỗi xác nhận đơn!');
@@ -251,6 +489,7 @@ export default function StaffDashboard() {
         method: 'PUT',
         headers: { Authorization: `Bearer ${token}` }
       });
+      showToast('Đã xác nhận bưng món lên bàn!');
       fetchData();
     } catch (e) {
       console.error(e);
@@ -259,96 +498,137 @@ export default function StaffDashboard() {
 
   const occupiedTablesCount = tables.filter(t => ['occupied', 'busy', 'payment_pending'].includes(t.status)).length;
 
-  // Các món còn hàng để chọn khi Đổi món cho khách
+  const categories = useMemo(() => {
+    const set = new Set(menuProducts.map(p => p.category_name || p.category || 'Món chính'));
+    return ['Tất cả', ...Array.from(set)];
+  }, [menuProducts]);
+
   const availableProductsForSwap = useMemo(() => {
-    return menuProducts.filter(
-      p => p.is_available !== false && p.is_available !== 0 && !outOfStockNames.includes(p.name)
-    );
-  }, [menuProducts, outOfStockNames]);
+    return menuProducts.filter(p => {
+      if (!isProductAvailable(p)) return false;
+      if (swapSearch && !(p.name || '').toLowerCase().includes(swapSearch.toLowerCase())) return false;
+      return true;
+    });
+  }, [menuProducts, outOfStockNames, swapSearch]);
 
-  const renderStaffItemBadge = (it, ord) => {
-    if (isItemOutOfStock(it)) {
-      return <span className="badge rounded-pill bg-danger text-white px-2.5 py-1">Bếp báo hết</span>;
-    }
-    let st = String(it.item_status || it.status || '').toLowerCase();
-    const ordSt = String(ord?.status || '').toLowerCase();
-    if ((!st || st === 'pending') && ['confirmed', 'preparing', 'cooking', 'ready'].includes(ordSt)) {
-      st = ordSt;
-    }
+  const filteredProductsForAdd = useMemo(() => {
+    return menuProducts.filter(p => {
+      if (!isProductAvailable(p)) return false;
+      const cat = p.category_name || p.category || 'Món chính';
+      if (addCategory !== 'Tất cả' && cat !== addCategory) return false;
+      if (addSearch && !(p.name || '').toLowerCase().includes(addSearch.toLowerCase())) return false;
+      return true;
+    });
+  }, [menuProducts, outOfStockNames, addCategory, addSearch]);
 
-    if (st === 'served' || st === 'completed') {
-      return <span className="badge rounded-pill bg-success text-white px-2.5 py-1">✓ Đã lên món</span>;
-    }
-    if (st === 'ready' || st === 'done') {
-      return <span className="badge rounded-pill bg-info text-dark fw-bold px-2.5 py-1">🔔 Chờ bưng ra bàn</span>;
-    }
-    if (st === 'preparing' || st === 'cooking') {
-      return <span className="badge rounded-pill bg-warning text-dark fw-bold px-2.5 py-1">🔥 Đang chế biến</span>;
-    }
-    if (st === 'confirmed') {
-      return <span className="badge rounded-pill bg-primary bg-opacity-10 text-primary border border-primary px-2.5 py-1">Đã chuyển Bếp/Bar</span>;
-    }
-    return <span className="badge rounded-pill bg-secondary text-white px-2.5 py-1">Chờ xác nhận</span>;
+  const filteredMenuTabProducts = useMemo(() => {
+    return menuProducts.filter(p => {
+      const cat = p.category_name || p.category || 'Món chính';
+      if (selectedCategory !== 'Tất cả' && cat !== selectedCategory) return false;
+      if (menuSearch && !(p.name || '').toLowerCase().includes(menuSearch.toLowerCase())) return false;
+      return true;
+    });
+  }, [menuProducts, selectedCategory, menuSearch]);
+
+  const openOrderPopupForTable = (tableId, tableName) => {
+    const foundTable = tables.find(t => t.id === tableId || t.table_number === tableName) || {
+      id: tableId,
+      table_number: tableName
+    };
+    setViewingTable(foundTable);
   };
 
+  const staffCodeText = staffProfileInfo?.staff_code || 'NV002';
+  const staffPositionText = staffProfileInfo?.position || 'Nhân viên phục vụ';
+  const staffStartDate = staffProfileInfo?.start_date || '19/10/2026';
+  const staffWorkDays = staffProfileInfo?.working_days || 28;
+
   return (
-    <div className="min-vh-100 d-flex flex-column bg-light position-relative" style={{ maxWidth: '480px', margin: '0 auto', paddingBottom: '84px' }}>
+    <div className="min-vh-100 d-flex flex-column position-relative staff-app-shell" style={{ maxWidth: '480px', margin: '0 auto', paddingBottom: '90px', backgroundColor: '#f1f5f9' }}>
       
-      {/* HEADER NHÂN VIÊN */}
-      <div className="p-3 text-white rounded-bottom-4 shadow-sm" style={{ backgroundColor: '#0047ab' }}>
-        <div className="d-flex justify-content-between align-items-center mb-3">
-          <div className="d-flex align-items-center gap-2.5">
-            <div className="rounded-circle bg-white text-primary fw-bolder d-flex align-items-center justify-content-center position-relative" style={{ width: '44px', height: '44px', fontSize: '18px' }}>
-              {staffName.charAt(0)}
-              <span className="position-absolute bottom-0 end-0 rounded-circle bg-success border border-white" style={{ width: '11px', height: '11px' }}></span>
-            </div>
-            <div>
-              <div className="d-flex align-items-center gap-1.5">
-                <h6 className="fw-bold mb-0">{staffName}</h6>
-                <span className="badge bg-white text-primary rounded-pill" style={{ fontSize: '10px' }}>Staff</span>
+      {/* ================================================================= */}
+      {/* HEADER TRANG CHỦ & THỰC ĐƠN (ĐÃ SỬA PADDING RỘNG RÃI, KHÔNG SÁT MÉP) */}
+      {/* ================================================================= */}
+      {bottomNav !== 'PROFILE' && (
+        <div className="staff-top-header">
+          <div className="d-flex justify-content-between align-items-center mb-3">
+            <div className="d-flex align-items-center gap-3">
+              <div className="staff-header-avatar">
+                {staffName.charAt(0)}
+                <span className="staff-online-dot"></span>
               </div>
-              <small className="text-white-50" style={{ fontSize: '11.5px' }}>Chỉ xem bàn, xác nhận đơn & đổi món</small>
+              <div>
+                <div className="d-flex align-items-center gap-2">
+                  <h6 className="fw-bolder mb-0 text-white" style={{ fontSize: '16.5px' }}>{staffName}</h6>
+                  <span className="badge bg-white text-primary rounded-pill fw-bold px-2 py-0.5" style={{ fontSize: '10.5px' }}>
+                    Staff
+                  </span>
+                </div>
+                <div className="text-white-50 mt-0.5" style={{ fontSize: '12px' }}>
+                  Xác nhận đơn • Sửa/Thêm món • Phục vụ bàn
+                </div>
+              </div>
             </div>
+            <button onClick={fetchData} className="staff-refresh-btn" title="Làm mới">
+              <RefreshCw size={18} className={loading ? 'spin-anim' : ''} />
+            </button>
           </div>
-          <button onClick={fetchData} className="btn btn-sm text-white p-1.5 rounded-circle">
-            <RefreshCw size={18} className={loading ? 'spin-anim' : ''} />
-          </button>
-        </div>
 
-        <div className="d-flex justify-content-between align-items-center pt-2 border-top border-white border-opacity-25">
-          <span className="small text-white-50">Trạng thái làm việc:</span>
-          <span className="badge bg-success rounded-pill px-3 py-1.5 d-flex align-items-center gap-1">
-            <CheckCircle2 size={13} /> Sẵn sàng
-          </span>
+          <div className="d-flex justify-content-between align-items-center pt-2 border-top border-white border-opacity-25">
+            <span className="text-white-50 fw-semibold" style={{ fontSize: '12.5px' }}>Trạng thái ca phục vụ:</span>
+            <span className="badge bg-success rounded-pill px-3 py-1 d-inline-flex align-items-center gap-1 shadow-sm" style={{ fontSize: '11.5px' }}>
+              <CheckCircle2 size={13} /> Đang sẵn sàng
+            </span>
+          </div>
         </div>
-      </div>
+      )}
 
-      {/* ========================================================================= */}
-      {/* KHUNG CẢNH BÁO CỐ ĐỊNH: MÓN ĐÃ HẾT CẦN BÁO KHÁCH ĐỔI MÓN HOẶC BÁO HỦY */}
-      {/* ========================================================================= */}
-      {outOfStockOrderItems.length > 0 && (
+      {/* TOAST NỔI */}
+      {staffToast && (
+        <div
+          className="position-fixed top-0 start-50 translate-middle-x mt-3 px-4 py-2 rounded-pill shadow-lg text-white fw-bold d-flex align-items-center gap-2"
+          style={{ zIndex: 4500, backgroundColor: '#10b981', fontSize: '13px' }}
+        >
+          <CheckCircle2 size={16} />
+          <span>{staffToast}</span>
+        </div>
+      )}
+
+      {/* KHUNG CẢNH BÁO MÓN HẾT */}
+      {bottomNav !== 'PROFILE' && outOfStockOrderItems.length > 0 && (
         <div className="mx-3 mt-3 p-3 rounded-4 bg-danger bg-opacity-10 border border-danger shadow-sm">
           <div className="d-flex align-items-center gap-2 text-danger fw-bolder mb-2" style={{ fontSize: '13.5px' }}>
             <AlertTriangle size={18} />
-            <span>MÓN BẾP BÁO HẾT CẦN BÁO KHÁCH ({outOfStockOrderItems.length})</span>
+            <span>MÓN BẾP BÁO HẾT CẦN ĐỔI CHO KHÁCH ({outOfStockOrderItems.length})</span>
           </div>
 
           <div className="d-flex flex-column gap-2">
             {outOfStockOrderItems.map(item => {
               const isWaitingCashier = requestedCancelIds.includes(item.id);
               return (
-                <div key={item.id} className="bg-white p-2.5 rounded-3 border border-danger shadow-sm">
-                  <div className="d-flex justify-content-between align-items-start mb-1">
-                    <span className="badge bg-danger text-white">{item.table_name} • {item.order_code}</span>
-                    <span className="text-danger fw-bold small">Hết món</span>
-                  </div>
-                  <div className="fw-bolder text-dark mb-2" style={{ fontSize: '14.5px' }}>
-                    {item.quantity}x {item.product_name || item.name}
+                <div key={item.id} className="bg-white p-3 rounded-3 border border-danger shadow-sm">
+                  <div className="d-flex align-items-center gap-2 mb-2">
+                    <img
+                      src={getItemImage(item)}
+                      alt={item.product_name || item.name}
+                      className="rounded-3 border object-fit-cover flex-shrink-0"
+                      style={{ width: '46px', height: '46px', filter: 'grayscale(60%)' }}
+                      onError={(e) => { e.target.src = 'https://placehold.co/200x200/e2e8f0/475569?text=Mon+An'; }}
+                    />
+                    <div className="flex-grow-1">
+                      <div className="d-flex justify-content-between align-items-center">
+                        <span className="badge bg-danger text-white">{item.table_name} • {item.order_code}</span>
+                        <span className="text-danger fw-bold small">Tạm hết</span>
+                      </div>
+                      <div className="fw-bolder text-dark mt-1" style={{ fontSize: '14.5px' }}>
+                        {item.quantity}x {item.product_name || item.name}
+                      </div>
+                    </div>
                   </div>
 
                   {isWaitingCashier ? (
                     <div className="p-2 rounded-2 bg-warning bg-opacity-25 text-dark small fw-bold text-center">
-                      ⏳ Đã gửi yêu cầu hủy món sang Thu ngân (Chờ Thu ngân xác nhận xóa)
+                      ⏳ Đã báo Thu ngân hủy món (Chờ xác nhận)
                     </div>
                   ) : (
                     <div className="d-flex gap-2">
@@ -364,7 +644,7 @@ export default function StaffDashboard() {
                         className="btn btn-sm btn-outline-danger fw-bold flex-fill rounded-pill d-flex align-items-center justify-content-center gap-1"
                         style={{ fontSize: '12px' }}
                       >
-                        <Ban size={13} /> Khách hủy (Báo Thu ngân)
+                        <Ban size={13} /> Báo hủy món
                       </button>
                     </div>
                   )}
@@ -375,126 +655,187 @@ export default function StaffDashboard() {
         </div>
       )}
 
-      {/* CẢNH BÁO KHÁCH GỌI NHÂN VIÊN / THANH TOÁN */}
-      {serviceRequests.map((req, idx) => (
-        <div key={idx} className="mx-3 mt-2 p-2.5 rounded-3 bg-danger text-white shadow d-flex justify-content-between align-items-center">
-          <div className="small fw-bold">
-            🚨 {req.table_name}: {req.type === 'CALL_PAYMENT' ? 'Yêu cầu thanh toán' : 'Gọi nhân viên hỗ trợ'}!
-          </div>
-          <button
-            onClick={() => setServiceRequests(prev => prev.filter((_, i) => i !== idx))}
-            className="btn btn-xs bg-white text-danger fw-bold rounded-pill px-2.5"
-          >
-            Đã hỗ trợ
-          </button>
-        </div>
-      ))}
-
-      {/* NỘI DUNG TRANG CHỦ */}
+      
+      {/* ================================================================= */}
+      {/* TAB 1: TRANG CHỦ (THẺ ĐƠN RÚT GỌN 3 MÓN -> BẤM VÀO HIỆN POPUP) */}
+      {/* ================================================================= */}
       {bottomNav === 'HOME' && (
         <>
           <div className="px-3 mt-3">
-            <div className="bg-white p-1.5 rounded-4 shadow-sm d-flex gap-1">
+            <div className="bg-white p-1 rounded-4 shadow-sm border d-flex gap-1">
               <button
                 onClick={() => setActiveTab('PENDING')}
-                className={`btn flex-grow-1 rounded-3 fw-bold py-2 border-0 ${activeTab === 'PENDING' ? 'bg-warning text-dark shadow-sm' : 'text-secondary'}`}
-                style={{ fontSize: '13px' }}
+                className={`btn flex-grow-1 rounded-3 fw-bolder py-2 px-1 border-0 transition-all ${
+                  activeTab === 'PENDING' ? 'bg-warning text-dark shadow-sm' : 'text-secondary'
+                }`}
+                style={{ fontSize: '12px' }}
               >
                 Chờ ({pendingOrders.length})
               </button>
               <button
                 onClick={() => setActiveTab('READY')}
-                className={`btn flex-grow-1 rounded-3 fw-bold py-2 border-0 ${activeTab === 'READY' ? 'bg-success text-white shadow-sm' : 'text-secondary'}`}
-                style={{ fontSize: '13px' }}
+                className={`btn flex-grow-1 rounded-3 fw-bolder py-2 px-1 border-0 transition-all ${
+                  activeTab === 'READY' ? 'bg-success text-white shadow-sm' : 'text-secondary'
+                }`}
+                style={{ fontSize: '12px' }}
               >
-                Bưng món ({readyToServeList.length})
+                Bưng ({readyToServeList.length})
+              </button>
+              <button
+                onClick={() => setActiveTab('ALERTS')}
+                className={`btn flex-grow-1 rounded-3 fw-bolder py-2 px-1 border-0 transition-all position-relative ${
+                  activeTab === 'ALERTS'
+                    ? 'bg-danger text-white shadow-sm'
+                    : (serviceRequests.length + outOfStockOrderItems.length) > 0
+                    ? 'text-danger fw-bolder'
+                    : 'text-secondary'
+                }`}
+                style={{ fontSize: '12px' }}
+              >
+                🚨 Cảnh báo ({serviceRequests.length + outOfStockOrderItems.length})
               </button>
               <button
                 onClick={() => setActiveTab('TABLES')}
-                className={`btn flex-grow-1 rounded-3 fw-bold py-2 border-0 ${activeTab === 'TABLES' ? 'bg-primary text-white shadow-sm' : 'text-secondary'}`}
-                style={{ fontSize: '13px' }}
+                className={`btn flex-grow-1 rounded-3 fw-bolder py-2 px-1 border-0 transition-all ${
+                  activeTab === 'TABLES' ? 'bg-primary text-white shadow-sm' : 'text-secondary'
+                }`}
+                style={{ fontSize: '12px' }}
               >
-                Bàn ăn ({occupiedTablesCount})
+                Bàn ({occupiedTablesCount})
               </button>
             </div>
           </div>
 
           <div className="p-3 flex-grow-1">
-            {/* TAB 1: ĐƠN CHỜ DUYỆT */}
             {activeTab === 'PENDING' && (
               pendingOrders.length === 0 ? (
-                <div className="text-center text-muted py-5">Không có đơn nào đang chờ duyệt.</div>
+                <div className="bg-white rounded-4 border p-5 text-center text-muted shadow-sm">
+                  <CheckCircle2 size={42} className="text-success opacity-50 mb-2" />
+                  <div className="fw-bold text-dark">Không có đơn nào đang chờ duyệt</div>
+                  <small>Khi khách quét QR đặt món, đơn sẽ hiện tại đây để bạn kiểm tra và xác nhận</small>
+                </div>
               ) : (
                 pendingOrders.map(order => {
-                  const items = order.items || order.order_items || [];
-                  const total = Number(order.total_amount) || items.reduce((s, i) => s + (Number(i.unit_price || i.price || 0) * Number(i.quantity || 1)), 0);
+                  const items = (order.items || order.order_items || []).filter(
+                    it => String(it.item_status || it.status || '').toLowerCase() !== 'cancelled'
+                  );
+                  const total = items.reduce(
+                    (s, i) => s + (isItemOutOfStock(i) ? 0 : getItemUnitPrice(i) * Number(i.quantity || 1)),
+                    0
+                  );
                   const tName = order.table_name || `Bàn 0${order.table_id}`;
+                  const ordCode = order.order_code || `ORD-${order.id}`;
+
+                  // CHỈ HIỂN THỊ TỐI ĐA 3 MÓN ĐẦU TIÊN CHO GỌN ĐẸP, BẤM VÀO SẼ MỞ POPUP ĐẦY ĐỦ
+                  const previewItems = items.slice(0, MAX_PREVIEW_ITEMS);
+                  const hiddenCount = Math.max(0, items.length - MAX_PREVIEW_ITEMS);
+                  const totalQtyCount = items.reduce((s, i) => s + Number(i.quantity || 1), 0);
 
                   return (
-                    <div key={order.id} className="card border-0 shadow-sm rounded-4 mb-3 border-start border-warning border-4">
-                      <div className="card-body p-3">
-                        <div className="d-flex justify-content-between align-items-start mb-2">
-                          <div>
-                            <h5 className="fw-bolder text-dark mb-0">{tName}</h5>
-                            <small className="text-muted">Mã đơn: {order.order_code || `ORD-${order.id}`}</small>
+                    <div key={order.id} className="staff-order-card mb-3">
+                      <div className="p-3">
+                        {/* Header đơn: Bấm vào để mở Popup chi tiết & sửa món */}
+                        <div className="d-flex justify-content-between align-items-center mb-2 pb-2 border-bottom">
+                          <div
+                            onClick={() => openOrderPopupForTable(order.table_id, tName)}
+                            className="cursor-pointer"
+                          >
+                            <div className="d-flex align-items-center gap-2">
+                              <h5 className="fw-bolder text-dark mb-0" style={{ fontSize: '18px' }}>{tName}</h5>
+                              <span className="badge bg-warning text-dark rounded-pill px-2 py-1 fw-bold" style={{ fontSize: '11px' }}>
+                                Chờ duyệt
+                              </span>
+                            </div>
+                            <small className="text-secondary fw-semibold">
+                              Mã đơn: {ordCode} • {items.length} loại ({totalQtyCount} phần)
+                            </small>
                           </div>
-                          <span className="badge bg-warning text-dark rounded-pill px-2.5 py-1 fw-bold">Chờ duyệt</span>
+
+                          <button
+                            onClick={() => openOrderPopupForTable(order.table_id, tName)}
+                            className="btn btn-sm btn-outline-primary rounded-pill px-3 py-1 fw-bold d-inline-flex align-items-center gap-1"
+                            style={{ fontSize: '12px' }}
+                          >
+                            <Eye size={14} /> Sửa / Thêm món
+                          </button>
                         </div>
 
-                        {items.length > 0 && (
-                          <div className="bg-light rounded-3 p-2 mb-2.5">
-                            {items.map((it, idx) => {
-                              const out = isItemOutOfStock(it);
-                              const waitingCancel = requestedCancelIds.includes(it.id);
-                              return (
-                                <div key={idx} className="py-1 border-bottom last-border-0">
-                                  <div className="d-flex justify-content-between align-items-center small">
-                                    <span className={`fw-semibold ${out ? 'text-danger text-decoration-line-through' : 'text-dark'}`}>
-                                      <b className="text-danger me-1">{it.quantity}x</b> {it.product_name || it.name}
-                                      {out && <span className="badge bg-danger ms-1">Bếp báo hết</span>}
-                                    </span>
-                                    <span className="text-muted">{(Number(it.unit_price || it.price || 0) * Number(it.quantity || 1)).toLocaleString()}đ</span>
-                                  </div>
+                        {/* Danh sách rút gọn (Tối đa 3 món) - Bấm vào mở Popup ngay */}
+                        <div
+                          onClick={() => openOrderPopupForTable(order.table_id, tName)}
+                          className="d-flex flex-column gap-2 mb-2 cursor-pointer"
+                        >
+                          {previewItems.map((it, idx) => {
+                            const out = isItemOutOfStock(it);
+                            const unitPrice = getItemUnitPrice(it);
+                            const qty = Number(it.quantity || 1);
 
-                                  {out && (
-                                    <div className="d-flex gap-1.5 mt-1.5">
-                                      <button
-                                        onClick={() => setSwappingItem({ ...it, table_name: tName, order_id: order.id })}
-                                        className="btn btn-xs btn-primary rounded-pill px-2.5 py-0.5 fw-bold"
-                                        style={{ fontSize: '11px' }}
-                                      >
-                                        <Repeat size={11} className="me-1" /> Đổi món
-                                      </button>
-                                      {waitingCancel ? (
-                                        <span className="badge bg-warning text-dark">Chờ Thu ngân xóa</span>
-                                      ) : (
-                                        <button
-                                          onClick={() => handleRequestCashierCancelItem(it, tName, order.order_code)}
-                                          className="btn btn-xs btn-outline-danger rounded-pill px-2.5 py-0.5 fw-bold"
-                                          style={{ fontSize: '11px' }}
-                                        >
-                                          <Ban size={11} className="me-1" /> Khách hủy món
-                                        </button>
-                                      )}
+                            return (
+                              <div key={it.id || idx} className={`staff-compact-item ${out ? 'out-of-stock' : ''}`}>
+                                <img
+                                  src={getItemImage(it)}
+                                  alt={it.product_name || it.name}
+                                  className="staff-compact-thumb"
+                                  onError={(e) => { e.target.src = 'https://placehold.co/200x200/e2e8f0/475569?text=Mon+An'; }}
+                                />
+                                <div className="flex-grow-1" style={{ minWidth: 0 }}>
+                                  <div className="d-flex justify-content-between align-items-center gap-2">
+                                    <span
+                                      className={`fw-bold text-truncate ${
+                                        out ? 'text-danger text-decoration-line-through' : 'text-dark'
+                                      }`}
+                                      style={{ fontSize: '14px' }}
+                                    >
+                                      <b className="text-danger me-1">{qty}x</b>
+                                      {it.product_name || it.name}
+                                    </span>
+                                    <span className="fw-bold text-primary flex-shrink-0" style={{ fontSize: '13.5px' }}>
+                                      {(unitPrice * qty).toLocaleString()}đ
+                                    </span>
+                                  </div>
+                                  {it.note && (
+                                    <div className="text-warning-emphasis small fw-semibold" style={{ fontSize: '11px' }}>
+                                      ⚠️ {it.note}
                                     </div>
                                   )}
                                 </div>
-                              );
-                            })}
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        {/* Thanh báo còn món ẩn (Nếu đơn dài > 3 món) -> Bấm vào bật Popup giống Bàn ăn */}
+                        {hiddenCount > 0 ? (
+                          <button
+                            type="button"
+                            onClick={() => openOrderPopupForTable(order.table_id, tName)}
+                            className="staff-more-items-banner mb-2"
+                          >
+                            <span>🔍 Xem thêm <b>+{hiddenCount} món khác</b> & Chỉnh sửa đơn</span>
+                            <ChevronRight size={16} />
+                          </button>
+                        ) : (
+                          <div
+                            onClick={() => openOrderPopupForTable(order.table_id, tName)}
+                            className="text-center text-primary fw-semibold py-1 mb-1 cursor-pointer"
+                            style={{ fontSize: '12px' }}
+                          >
+                            👆 Chạm vào danh sách món để Tăng/Giảm, Đổi hoặc Xóa món
                           </div>
                         )}
 
+                        {/* Footer Tổng tiền + Nút Xác nhận đơn luôn nằm gọn trong tầm mắt */}
                         <div className="d-flex justify-content-between align-items-center pt-2 border-top">
                           <div>
-                            <span className="text-muted small">Tổng tiền: </span>
-                            <span className="fw-bolder text-primary fs-6">{total.toLocaleString()}đ</span>
+                            <div className="text-muted" style={{ fontSize: '11.5px' }}>Tổng cộng ({totalQtyCount} phần):</div>
+                            <div className="fw-bolder text-primary" style={{ fontSize: '18px' }}>{total.toLocaleString()}đ</div>
                           </div>
                           <button
                             onClick={() => handleConfirmOrder(order.id)}
-                            className="btn btn-warning fw-bold rounded-pill px-3.5 py-1.5 shadow-sm"
-                            style={{ fontSize: '13px' }}
+                            className="btn btn-warning fw-bolder rounded-pill px-4 py-2 shadow-sm d-flex align-items-center gap-1"
+                            style={{ fontSize: '14px' }}
                           >
-                            Xác nhận đơn
+                            <Check size={16} /> Xác nhận đơn
                           </button>
                         </div>
                       </div>
@@ -504,26 +845,40 @@ export default function StaffDashboard() {
               )
             )}
 
-            {/* TAB 2: BƯNG MÓN */}
+            {/* 2. DANH SÁCH MÓN CHỜ BƯNG */}
             {activeTab === 'READY' && (
               readyToServeList.length === 0 ? (
-                <div className="text-center text-muted py-5">Chưa có món nào chờ bưng tại Trạm Tiếp Thực.</div>
+                <div className="bg-white rounded-4 border p-5 text-center text-muted shadow-sm">
+                  <Utensils size={40} className="text-secondary opacity-50 mb-2" />
+                  <div className="fw-bold text-dark">Chưa có món nào chờ bưng</div>
+                  <small>Các món Bếp/Bar hoàn thành sẽ hiển thị tại đây</small>
+                </div>
               ) : (
                 readyToServeList.map(item => (
-                  <div key={item.id} className="card border-0 shadow-sm rounded-4 mb-2.5 border-start border-success border-4">
-                    <div className="card-body p-3 d-flex justify-content-between align-items-center">
-                      <div>
-                        <span className="badge bg-primary mb-1">{item.tableName}</span>
-                        <div className="fw-bold text-dark fs-6">
-                          <span className="text-danger me-1">{item.quantity}x</span> {item.productName}
+                  <div key={item.id} className="card border-0 shadow-sm rounded-4 mb-2 border-start border-success border-4">
+                    <div className="card-body p-3 d-flex justify-content-between align-items-center gap-2">
+                      <div className="d-flex align-items-center gap-3">
+                        <img
+                          src={getItemImage(item)}
+                          alt={item.productName}
+                          className="staff-compact-thumb"
+                          style={{ width: '52px', height: '52px' }}
+                          onError={(e) => { e.target.src = 'https://placehold.co/200x200/e2e8f0/475569?text=Mon+An'; }}
+                        />
+                        <div>
+                          <span className="badge bg-primary mb-1">{item.tableName}</span>
+                          <div className="fw-bolder text-dark" style={{ fontSize: '15px' }}>
+                            <span className="text-danger me-1">{item.quantity}x</span> {item.productName}
+                          </div>
+                          {item.note && <div className="small text-danger fw-semibold">⚠️ {item.note}</div>}
                         </div>
-                        {item.note && <div className="small text-danger fw-semibold">Ghi chú: {item.note}</div>}
                       </div>
                       <button
                         onClick={() => handleMarkServed(item.id)}
-                        className="btn btn-success fw-bold rounded-pill px-3 py-2 d-flex align-items-center gap-1"
+                        className="btn btn-success fw-bold rounded-pill px-3 py-2 d-flex align-items-center gap-1 flex-shrink-0"
+                        style={{ fontSize: '13px' }}
                       >
-                        <Check size={15} /> Đã lên món
+                        <Check size={15} /> Đã lên
                       </button>
                     </div>
                   </div>
@@ -531,9 +886,101 @@ export default function StaffDashboard() {
               )
             )}
 
-            {/* TAB 3: SƠ ĐỒ BÀN (BẤM VÀO BÀN ĐỂ XEM ORDER CỦA BÀN ĐÓ & ĐỔI MÓN) */}
+            {/* TAB CẢNH BÁO RIÊNG BIỆT CHO NHÂN VIÊN */}
+            {activeTab === 'ALERTS' && (
+              (serviceRequests.length === 0 && outOfStockOrderItems.length === 0) ? (
+                <div className="bg-white rounded-4 border p-5 text-center text-muted shadow-sm">
+                  <CheckCircle2 size={42} className="text-success opacity-50 mb-2" />
+                  <div className="fw-bold text-dark">Hiện không có cảnh báo nào</div>
+                  <small>Khi khách bấm Gọi hỗ trợ / Thanh toán hoặc Bếp báo hết món, cảnh báo sẽ hiện tại đây</small>
+                </div>
+              ) : (
+                <div className="d-flex flex-column gap-2">
+                  {/* 1. Danh sách khách gọi hỗ trợ / gọi thanh toán từ bàn */}
+                  {serviceRequests.map((req, idx) => (
+                    <div
+                      key={req.call_id || idx}
+                      className="bg-white p-3 rounded-4 border border-danger border-start border-4 shadow-sm"
+                    >
+                      <div className="d-flex justify-content-between align-items-center mb-1">
+                        <span className="badge bg-danger text-white px-2.5 py-1 rounded-pill">
+                          🔔 {req.table_name}
+                        </span>
+                        <small className="text-muted fw-semibold">{req.time || 'Vừa xong'}</small>
+                      </div>
+                      <div className="fw-bolder text-dark mt-1" style={{ fontSize: '15px' }}>
+                        {req.type === 'CALL_PAYMENT'
+                          ? `💳 Khách yêu cầu thanh toán (${req.payment_method === 'TRANSFER' ? 'Chuyển khoản QR' : 'Tiền mặt'})`
+                          : `🙋 Yêu cầu: "${req.note || 'Gọi nhân viên hỗ trợ'}"`}
+                      </div>
+                      <div className="d-flex justify-content-end gap-2 mt-2 pt-2 border-top">
+                        <button
+                          onClick={() => openOrderPopupForTable(req.table_id, req.table_name)}
+                          className="btn btn-sm btn-outline-primary rounded-pill px-3 fw-bold"
+                        >
+                          Xem bàn
+                        </button>
+                        <button
+                          onClick={async () => {
+                            setServiceRequests(prev => prev.filter((_, i) => i !== idx));
+                            if (req.table_id) {
+                              await fetch(`${API_BASE}/api/kitchen/live-alerts-v2/${req.table_id}/resolve`, {
+          method: 'PUT',
+          headers: { Authorization: `Bearer ${token}` }
+        }).catch(() => null);
+                            }
+                            showToast(`Đã xác nhận hỗ trợ ${req.table_name}`);
+                          }}
+                          className="btn btn-sm btn-success rounded-pill px-3 fw-bold"
+                        >
+                          ✓ Đã hỗ trợ khách
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+
+                  {/* 2. Danh sách món Bếp báo hết cần đổi cho khách */}
+                  {outOfStockOrderItems.map(item => {
+                    const isWaitingCashier = requestedCancelIds.includes(item.id);
+                    return (
+                      <div key={item.id} className="bg-white p-3 rounded-4 border border-warning border-start border-4 shadow-sm">
+                        <div className="d-flex justify-content-between align-items-center mb-1">
+                          <span className="badge bg-warning text-dark">{item.table_name} • {item.order_code}</span>
+                          <span className="text-danger fw-bold small">⚠️ Bếp báo hết món</span>
+                        </div>
+                        <div className="fw-bolder text-dark my-1" style={{ fontSize: '15px' }}>
+                          {item.quantity}x {item.product_name || item.name}
+                        </div>
+                        {isWaitingCashier ? (
+                          <div className="p-2 rounded-2 bg-warning bg-opacity-25 text-dark small fw-bold text-center mt-2">
+                            ⏳ Đã báo Thu ngân hủy món (Chờ xác nhận)
+                          </div>
+                        ) : (
+                          <div className="d-flex gap-2 mt-2">
+                            <button
+                              onClick={() => setSwappingItem(item)}
+                              className="btn btn-sm btn-primary fw-bold flex-fill rounded-pill"
+                            >
+                              🔄 Đổi món khác
+                            </button>
+                            <button
+                              onClick={() => handleRequestCashierCancelItem(item, item.table_name, item.order_code)}
+                              className="btn btn-sm btn-outline-danger fw-bold flex-fill rounded-pill"
+                            >
+                              🚫 Báo hủy món
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )
+            )}
+
+            {/* 3. SƠ ĐỒ BÀN ĂN */}
             {activeTab === 'TABLES' && (
-              <div className="row g-2.5">
+              <div className="row g-2">
                 {tables.map(t => {
                   const tableOrders = orders.filter(
                     o => (o.table_id === t.id || o.table_name === t.table_number) &&
@@ -541,28 +988,34 @@ export default function StaffDashboard() {
                   );
                   const isOccupied = ['occupied', 'busy', 'payment_pending'].includes(t.status) || tableOrders.length > 0;
                   const hasOutItem = tableOrders.some(o => (o.items || o.order_items || []).some(isItemOutOfStock));
+                  const totalItemsCount = tableOrders.reduce(
+                    (s, o) => s + (o.items || o.order_items || []).filter(i => String(i.item_status || i.status) !== 'cancelled').reduce((acc, it) => acc + Number(it.quantity || 1), 0),
+                    0
+                  );
 
                   return (
                     <div key={t.id} className="col-6">
                       <div
                         onClick={() => setViewingTable(t)}
-                        className={`p-3 rounded-4 shadow-sm border text-center cursor-pointer position-relative ${
+                        className={`p-3 rounded-4 shadow-sm border text-center cursor-pointer position-relative transition-all ${
                           hasOutItem
                             ? 'bg-danger bg-opacity-10 border-danger'
                             : isOccupied
-                            ? 'bg-primary bg-opacity-10 border-primary'
+                            ? 'bg-white border-primary border-2'
                             : 'bg-white'
                         }`}
                       >
                         {hasOutItem && (
-                          <span className="position-absolute top-0 end-0 m-1.5 badge rounded-pill bg-danger">
+                          <span className="position-absolute top-0 end-0 m-1 badge rounded-pill bg-danger">
                             Có món hết!
                           </span>
                         )}
-                        <div className="fw-bold text-dark fs-6">{t.table_number}</div>
-                        <span className={`badge rounded-pill mt-1 ${isOccupied ? 'bg-primary' : 'bg-secondary bg-opacity-25 text-secondary'}`}>
-                          {isOccupied ? `Xem Order (${tableOrders.length} đơn)` : 'Bàn trống'}
-                        </span>
+                        <div className="fw-bolder text-dark" style={{ fontSize: '16px' }}>{t.table_number}</div>
+                        <div className="mt-1">
+                          <span className={`badge rounded-pill px-2 py-1 ${isOccupied ? 'bg-primary text-white' : 'bg-light text-secondary border'}`}>
+                            {isOccupied ? `Đang ngồi • ${totalItemsCount} món` : 'Bàn trống (+ Gọi món)'}
+                          </span>
+                        </div>
                       </div>
                     </div>
                   );
@@ -573,30 +1026,78 @@ export default function StaffDashboard() {
         </>
       )}
 
-      {/* TAB THỰC ĐƠN (CHỈ XEM TRẠNG THÁI CÒN MÓN / TẠM HẾT - KHÔNG CHO NHÂN VIÊN TỰ SỬA) */}
+      {/* ================================================================= */}
+      {/* TAB 2: THỰC ĐƠN (ĐÃ CĂN CHỈNH LẠI PADDING ĐẸP, KHÔNG SÁT MÉP) */}
+      {/* ================================================================= */}
       {bottomNav === 'MENU' && (
         <div className="p-3 flex-grow-1">
-          <div className="d-flex justify-content-between align-items-center mb-3">
-            <h6 className="fw-bold text-dark mb-0">Trạng thái Thực đơn hôm nay</h6>
-            <span className="badge bg-light text-secondary border">Chỉ xem (Bếp quản lý)</span>
+          <div className="bg-white p-3 rounded-4 border shadow-sm mb-3">
+            <h6 className="fw-bolder text-dark mb-2" style={{ fontSize: '16px' }}>
+              Thực đơn Nhà hàng ({filteredMenuTabProducts.length})
+            </h6>
+            <div className="input-group input-group-sm mb-2">
+              <span className="input-group-text bg-light border-end-0 rounded-start-pill ps-3">
+                <Search size={14} className="text-secondary" />
+              </span>
+              <input
+                type="text"
+                value={menuSearch}
+                onChange={(e) => setMenuSearch(e.target.value)}
+                placeholder="Tìm nhanh tên món ăn, đồ uống..."
+                className="form-control bg-light border-start-0 rounded-end-pill shadow-none"
+              />
+            </div>
+
+            <div className="d-flex gap-2 overflow-auto pb-1 pt-1" style={{ scrollbarWidth: 'none' }}>
+              {categories.map(cat => (
+                <button
+                  key={cat}
+                  onClick={() => setSelectedCategory(cat)}
+                  className={`btn btn-sm rounded-pill px-3 py-1 fw-bold flex-shrink-0 border-0 ${
+                    selectedCategory === cat ? 'bg-primary text-white shadow-sm' : 'bg-light text-secondary'
+                  }`}
+                  style={{ fontSize: '12px' }}
+                >
+                  {cat}
+                </button>
+              ))}
+            </div>
           </div>
+
           <div className="d-flex flex-column gap-2">
-            {menuProducts.map(p => {
-              const avail = p.is_available !== false && p.is_available !== 0 && !outOfStockNames.includes(p.name);
+            {filteredMenuTabProducts.map(p => {
+              const avail = isProductAvailable(p);
               return (
                 <div
                   key={p.id}
-                  className={`p-2.5 rounded-3 shadow-sm border d-flex justify-content-between align-items-center ${
+                  className={`p-3 rounded-4 shadow-sm border d-flex align-items-center justify-content-between gap-3 ${
                     avail ? 'bg-white' : 'bg-danger bg-opacity-10 border-danger'
                   }`}
-                  style={{ opacity: avail ? 1 : 0.7 }}
+                  style={{ opacity: avail ? 1 : 0.72 }}
                 >
-                  <div>
-                    <div className={`fw-bold ${avail ? 'text-dark' : 'text-danger text-decoration-line-through'}`}>{p.name}</div>
-                    <small className="text-primary fw-semibold">{Number(p.price || 0).toLocaleString()}đ</small>
+                  <div className="d-flex align-items-center gap-3" style={{ minWidth: 0 }}>
+                    <img
+                      src={getProductImageUrl(p)}
+                      alt={p.name}
+                      className="rounded-3 border object-fit-cover flex-shrink-0"
+                      style={{ width: '58px', height: '58px', filter: avail ? 'none' : 'grayscale(70%)' }}
+                      onError={(e) => { e.target.src = 'https://placehold.co/200x200/e2e8f0/475569?text=Mon+An'; }}
+                    />
+                    <div style={{ minWidth: 0 }}>
+                      <div className={`fw-bolder text-truncate ${avail ? 'text-dark' : 'text-danger text-decoration-line-through'}`} style={{ fontSize: '15px' }}>
+                        {p.name}
+                      </div>
+                      <div className="text-muted small text-truncate" style={{ fontSize: '12px' }}>
+                        {p.category_name || p.category || 'Món chính'}
+                      </div>
+                      <div className="fw-bolder text-primary mt-0.5" style={{ fontSize: '14.5px' }}>
+                        {Number(p.price || 0).toLocaleString()}đ
+                      </div>
+                    </div>
                   </div>
-                  <span className={`badge rounded-pill px-3 py-1.5 ${avail ? 'bg-success' : 'bg-danger'}`}>
-                    {avail ? 'Còn món' : 'Đã hết món'}
+
+                  <span className={`badge rounded-pill px-3 py-1.5 flex-shrink-0 ${avail ? 'bg-success-subtle text-success border border-success-subtle' : 'bg-danger text-white'}`}>
+                    {avail ? '● Còn món' : 'Tạm hết'}
                   </span>
                 </div>
               );
@@ -605,262 +1106,768 @@ export default function StaffDashboard() {
         </div>
       )}
 
-      {/* TAB CÁ NHÂN */}
+      {/* ================================================================= */}
+      {/* TAB 3: TRANG CÁ NHÂN (THIẾT KẾ GIỐNG HỆT MẪU ẢNH 4 CHO NGHIỆP VỤ BÁN HÀNG) */}
+      {/* ================================================================= */}
       {bottomNav === 'PROFILE' && (
-        <div className="p-3 flex-grow-1">
-          <div className="bg-white p-3 rounded-4 shadow-sm mb-3">
-            <div className="fw-bold text-dark">{staffName}</div>
-            <div className="small text-muted">Vai trò: Nhân viên phục vụ (Chỉ xem order, xác nhận đơn & đổi món)</div>
+        <div className="flex-grow-1 d-flex flex-column">
+          {/* Banner xanh dương trên cùng giống Ảnh 4 */}
+          <div className="staff-profile-hero">
+            <div className="d-flex align-items-center gap-3">
+              <div className="staff-profile-avatar-circle">
+                {staffName.charAt(0)}
+              </div>
+              <div>
+                <h5 className="fw-bolder text-white mb-1" style={{ fontSize: '18.5px' }}>
+                  {staffName}
+                </h5>
+                <div className="text-white opacity-90 fw-semibold" style={{ fontSize: '13.5px' }}>
+                  MNV: {staffCodeText} • {staffPositionText}
+                </div>
+              </div>
+            </div>
           </div>
-          <button
-            onClick={() => { localStorage.removeItem('access_token'); window.location.href = '/login'; }}
-            className="btn btn-outline-danger w-100 rounded-3 fw-bold py-2 d-flex align-items-center justify-content-center gap-2"
-          >
-            <LogOut size={16} /> Đăng xuất
-          </button>
+
+          {/* Thẻ trắng nổi chồng lên nền xanh (Overlapping Menu List) giống hệt Ảnh 4 */}
+          <div className="px-3 flex-grow-1 d-flex flex-column justify-content-between">
+            <div className="staff-profile-menu-card">
+              {/* Mục 1: Thông tin nhân sự & Ca trực */}
+              <button
+                type="button"
+                onClick={() => setProfileSubModal('INFO')}
+                className="staff-profile-menu-item"
+              >
+                <div className="staff-profile-icon-circle" style={{ backgroundColor: '#eff6ff', color: '#2563eb' }}>
+                  <IdCard size={18} />
+                </div>
+                <span className="staff-profile-item-label">Thông tin nhân viên & Ca trực</span>
+                <ChevronRight size={17} className="text-secondary opacity-50" />
+              </button>
+
+              {/* Mục 2: Thống kê hiệu suất bán hàng & phục vụ */}
+              <button
+                type="button"
+                onClick={() => setProfileSubModal('STATS')}
+                className="staff-profile-menu-item"
+              >
+                <div className="staff-profile-icon-circle" style={{ backgroundColor: '#ecfdf5', color: '#059669' }}>
+                  <BarChart3 size={18} />
+                </div>
+                <span className="staff-profile-item-label">Thống kê phục vụ trong ca</span>
+                <ChevronRight size={17} className="text-secondary opacity-50" />
+              </button>
+
+              {/* Mục 3: Đổi mật khẩu */}
+              <button
+                type="button"
+                onClick={() => setProfileSubModal('PASSWORD')}
+                className="staff-profile-menu-item"
+              >
+                <div className="staff-profile-icon-circle" style={{ backgroundColor: '#e0f2fe', color: '#0284c7' }}>
+                  <Lock size={18} />
+                </div>
+                <span className="staff-profile-item-label">Đổi mật khẩu</span>
+                <ChevronRight size={17} className="text-secondary opacity-50" />
+              </button>
+
+              {/* Mục 4: Quy trình & Nội quy phục vụ */}
+              <button
+                type="button"
+                onClick={() => setProfileSubModal('SOP')}
+                className="staff-profile-menu-item"
+              >
+                <div className="staff-profile-icon-circle" style={{ backgroundColor: '#f5f3ff', color: '#7c3aed' }}>
+                  <FileText size={18} />
+                </div>
+                <span className="staff-profile-item-label">Quy trình & Nội quy phục vụ</span>
+                <ChevronRight size={17} className="text-secondary opacity-50" />
+              </button>
+
+              {/* Mục 5: Góp ý vận hành / Báo sự cố */}
+              <button
+                type="button"
+                onClick={() => setProfileSubModal('FEEDBACK')}
+                className="staff-profile-menu-item"
+              >
+                <div className="staff-profile-icon-circle" style={{ backgroundColor: '#fff7ed', color: '#ea580c' }}>
+                  <MessageSquare size={18} />
+                </div>
+                <span className="staff-profile-item-label">Báo cáo sự cố & Góp ý vận hành</span>
+                <ChevronRight size={17} className="text-secondary opacity-50" />
+              </button>
+
+              {/* Mục 6: Thông báo (Có công tắc gạt Toggle màu xanh giống hệt Ảnh 4) */}
+              <div className="staff-profile-menu-item" onClick={handleToggleNotify}>
+                <div className="staff-profile-icon-circle" style={{ backgroundColor: '#fef2f2', color: '#dc2626' }}>
+                  <Bell size={18} />
+                </div>
+                <span className="staff-profile-item-label">Thông báo đơn mới & Trạm PASS</span>
+                <div className={`ios-switch ${notifyEnabled ? 'active' : ''}`}>
+                  <div className="ios-switch-thumb" />
+                </div>
+              </div>
+
+              {/* Mục 7: Đăng xuất */}
+              <button
+                type="button"
+                onClick={() => { localStorage.removeItem('access_token'); window.location.href = '/login'; }}
+                className="staff-profile-menu-item border-0"
+              >
+                <div className="staff-profile-icon-circle" style={{ backgroundColor: '#fef2f2', color: '#dc2626' }}>
+                  <LogOut size={18} />
+                </div>
+                <span className="staff-profile-item-label text-danger fw-bold">Đăng xuất</span>
+                <ChevronRight size={17} className="text-secondary opacity-50" />
+              </button>
+            </div>
+
+            <div className="text-center text-secondary py-4" style={{ fontSize: '13px' }}>
+              Phiên bản 2.19.0
+            </div>
+          </div>
         </div>
       )}
 
-     {/* MODAL XEM CHI TIẾT ORDER CỦA BÀN (CHO NHÂN VIÊN ĐỔI MÓN HOẶC BÁO THU NGÂN HỦY) */}
-      {viewingTable && (
-        <div
-          className="modal d-block"
-          style={{ backgroundColor: 'rgba(15, 23, 42, 0.65)', zIndex: 2100 }}
-          onClick={() => setViewingTable(null)}
-        >
-          <div className="modal-dialog modal-dialog-centered mx-3" onClick={e => e.stopPropagation()}>
-            <div className="modal-content rounded-4 border-0 shadow-lg overflow-hidden">
-              <div className="modal-header bg-primary text-white py-3">
-                <h6 className="modal-title fw-bold mb-0">
-                  Chi tiết Order • {viewingTable.table_number}
-                </h6>
-                <button
-                  type="button"
-                  className="btn-close btn-close-white"
-                  onClick={() => setViewingTable(null)}
-                />
-              </div>
+      {/* ================================================================= */}
+      {/* CÁC POPUP CHI TIẾT CHO TRANG CÁ NHÂN */}
+      {/* ================================================================= */}
+      {profileSubModal && (
+        <div className="staff-popup-backdrop" onClick={() => setProfileSubModal(null)}>
+          <div className="staff-popup-sheet" onClick={e => e.stopPropagation()}>
+            <div className="staff-popup-header">
+              <h6 className="fw-bolder mb-0 text-white" style={{ fontSize: '16px' }}>
+                {profileSubModal === 'INFO' && '🪪 Hồ Sơ Nhân Sự & Ca Trực'}
+                {profileSubModal === 'STATS' && '📊 Thống Kê Phục Vụ Trong Ca'}
+                {profileSubModal === 'PASSWORD' && '🔑 Đổi Mật Khẩu Tài Khoản'}
+                {profileSubModal === 'SOP' && '📖 Quy Trình Phục Vụ Chuẩn (SOP)'}
+                {profileSubModal === 'FEEDBACK' && '💬 Báo Cáo Sự Cố / Góp Ý'}
+              </h6>
+              <button type="button" onClick={() => setProfileSubModal(null)} className="staff-popup-close-btn">
+                <X size={18} />
+              </button>
+            </div>
 
-              <div className="modal-body p-3" style={{ maxHeight: '70vh', overflowY: 'auto' }}>
-                {(() => {
-                  const tOrders = orders.filter(
-                    o =>
-                      (o.table_id === viewingTable.id || o.table_name === viewingTable.table_number) &&
-                      !['completed', 'cancelled', 'paid'].includes(String(o.status).toLowerCase())
-                  );
+            <div className="staff-popup-body bg-white">
+              {profileSubModal === 'INFO' && (
+                <div className="d-flex flex-column gap-2">
+                  <div className="p-3 rounded-3 bg-light border d-flex justify-content-between">
+                    <span className="text-secondary">Họ và tên:</span>
+                    <b className="text-dark">{staffName}</b>
+                  </div>
+                  <div className="p-3 rounded-3 bg-light border d-flex justify-content-between">
+                    <span className="text-secondary">Mã nhân viên:</span>
+                    <b className="text-primary">{staffCodeText}</b>
+                  </div>
+                  <div className="p-3 rounded-3 bg-light border d-flex justify-content-between">
+                    <span className="text-secondary">Vị trí công việc:</span>
+                    <b className="text-dark">{staffPositionText}</b>
+                  </div>
+                  <div className="p-3 rounded-3 bg-light border d-flex justify-content-between">
+                    <span className="text-secondary">Chi nhánh:</span>
+                    <b className="text-dark">Nhà hàng Trung Tâm</b>
+                  </div>
+                  <div className="p-3 rounded-3 bg-light border d-flex justify-content-between">
+                    <span className="text-secondary">Ngày bắt đầu làm:</span>
+                    <b className="text-dark">{staffStartDate}</b>
+                  </div>
+                  <div className="p-3 rounded-3 bg-light border d-flex justify-content-between">
+                    <span className="text-secondary">Thâm niên làm việc:</span>
+                    <span className="badge bg-success rounded-pill px-3 py-1">{staffWorkDays} ngày</span>
+                  </div>
+                </div>
+              )}
 
-                  if (tOrders.length === 0) {
-                    return (
-                      <div className="text-center text-muted py-4">
-                        Bàn này hiện chưa có món nào.
-                      </div>
-                    );
-                  }
+              {profileSubModal === 'STATS' && (
+                <div className="row g-2">
+                  <div className="col-6">
+                    <div className="p-3 rounded-4 border bg-light text-center">
+                      <div className="fs-3 fw-bolder text-primary">{occupiedTablesCount}</div>
+                      <div className="small text-secondary fw-semibold">Bàn đang phục vụ</div>
+                    </div>
+                  </div>
+                  <div className="col-6">
+                    <div className="p-3 rounded-4 border bg-light text-center">
+                      <div className="fs-3 fw-bolder text-warning">{pendingOrders.length}</div>
+                      <div className="small text-secondary fw-semibold">Đơn QR chờ duyệt</div>
+                    </div>
+                  </div>
+                  <div className="col-6">
+                    <div className="p-3 rounded-4 border bg-light text-center">
+                      <div className="fs-3 fw-bolder text-success">{readyToServeList.length}</div>
+                      <div className="small text-secondary fw-semibold">Món chờ bưng ra bàn</div>
+                    </div>
+                  </div>
+                  <div className="col-6">
+                    <div className="p-3 rounded-4 border bg-light text-center">
+                      <div className="fs-3 fw-bolder text-danger">{outOfStockOrderItems.length}</div>
+                      <div className="small text-secondary fw-semibold">Món hết cần đổi</div>
+                    </div>
+                  </div>
+                </div>
+              )}
 
-                  // Các đơn của khách mới quét QR đang chờ nhân viên duyệt
-                  const pendingConfirmOrders = tOrders.filter(
-                    o => String(o.status).toLowerCase() === 'pending'
-                  );
+              {profileSubModal === 'PASSWORD' && (
+                <form
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    if (pwdForm.newPwd.length < 4) {
+                      return alert('Mật khẩu mới phải có ít nhất 4 ký tự!');
+                    }
+                    if (pwdForm.newPwd !== pwdForm.confirmPwd) {
+                      return alert('Mật khẩu xác nhận không khớp!');
+                    }
 
-                  // Gom các món trùng tên và cùng trạng thái lại thành 1 dòng gọn gàng
-                  const mergedMap = {};
-                  tOrders.forEach(ord => {
-                    const ordSt = String(ord.status || '').toLowerCase();
-                    (ord.items || ord.order_items || []).forEach(it => {
-                      const rawSt = String(it.item_status || it.status || '').toLowerCase();
-                      if (rawSt === 'cancelled') return;
+                    try {
+                      const res = await fetch(`${API_BASE}/api/kitchen/staff/change-password`, {
+                        method: 'PUT',
+                        headers: {
+                          'Content-Type': 'application/json',
+                          Authorization: `Bearer ${token}`
+                        },
+                        body: JSON.stringify({
+                          staff_name: staffName,
+                          old_password: pwdForm.oldPwd,
+                          new_password: pwdForm.newPwd
+                        })
+                      });
 
-                      let st = rawSt;
-                      if (
-                        (!st || st === 'pending') &&
-                        ['confirmed', 'preparing', 'cooking', 'ready'].includes(ordSt)
-                      ) {
-                        st = ordSt;
-                      }
-
-                      const out = isItemOutOfStock(it);
-                      if (out) st = 'out_of_stock';
-
-                      const name = it.product_name || it.name;
-                      const key = out ? `OUT_${it.id}` : `${name}__${st}`;
-
-                      if (!mergedMap[key]) {
-                        mergedMap[key] = {
-                          ...it,
-                          name,
-                          quantity: Number(it.quantity || 1),
-                          effectiveStatus: st,
-                          isOut: out,
-                          order_id: ord.id,
-                          order_code: ord.order_code || `ORD-${ord.id}`
-                        };
+                      const data = await res.json().catch(() => ({}));
+                      if (res.ok) {
+                        showToast('Đã cập nhật mật khẩu mới vào hệ thống!');
+                        setPwdForm({ oldPwd: '', newPwd: '', confirmPwd: '' });
+                        setProfileSubModal(null);
                       } else {
-                        mergedMap[key].quantity += Number(it.quantity || 1);
+                        alert(data.detail || 'Đổi mật khẩu thất bại!');
                       }
-                    });
-                  });
+                    } catch (err) {
+                      alert('Không thể kết nối máy chủ để đổi mật khẩu!');
+                    }
+                  }}
+                >
+                  {/* Input ẩn username giúp trình duyệt nhận diện form chuẩn xác */}
+                  <input
+                    type="text"
+                    name="username"
+                    value={staffName}
+                    autoComplete="username"
+                    readOnly
+                    style={{ display: 'none' }}
+                  />
 
-                  const mergedList = Object.values(mergedMap);
+                  <div className="mb-3">
+                    <label className="form-label small fw-bold">Mật khẩu hiện tại</label>
+                    <input
+                      type="password"
+                      required
+                      autoComplete="current-password"
+                      value={pwdForm.oldPwd}
+                      onChange={(e) => setPwdForm({ ...pwdForm, oldPwd: e.target.value })}
+                      className="form-control rounded-3"
+                      placeholder="Nhập mật khẩu cũ..."
+                    />
+                  </div>
+                  <div className="mb-3">
+                    <label className="form-label small fw-bold">Mật khẩu mới</label>
+                    <input
+                      type="password"
+                      required
+                      autoComplete="new-password"
+                      value={pwdForm.newPwd}
+                      onChange={(e) => setPwdForm({ ...pwdForm, newPwd: e.target.value })}
+                      className="form-control rounded-3"
+                      placeholder="Nhập mật khẩu mới..."
+                    />
+                  </div>
+                  <div className="mb-3">
+                    <label className="form-label small fw-bold">Xác nhận mật khẩu mới</label>
+                    <input
+                      type="password"
+                      required
+                      autoComplete="new-password"
+                      value={pwdForm.confirmPwd}
+                      onChange={(e) => setPwdForm({ ...pwdForm, confirmPwd: e.target.value })}
+                      className="form-control rounded-3"
+                      placeholder="Nhập lại mật khẩu mới..."
+                    />
+                  </div>
+                  <button type="submit" className="btn btn-primary w-100 rounded-pill fw-bold py-2">
+                    Lưu mật khẩu mới
+                  </button>
+                </form>
+              )}
 
-                  const renderBadgeVN = (st) => {
-                    if (st === 'out_of_stock') {
-                      return <span className="badge rounded-pill bg-danger text-white px-2.5 py-1">Bếp báo hết</span>;
-                    }
-                    if (st === 'served' || st === 'completed') {
-                      return <span className="badge rounded-pill bg-success text-white px-2.5 py-1">✓ Đã lên món</span>;
-                    }
-                    if (st === 'ready' || st === 'done') {
-                      return <span className="badge rounded-pill bg-info text-dark fw-bold px-2.5 py-1">Chờ tại PASS</span>;
-                    }
-                    if (st === 'preparing' || st === 'cooking') {
-                      return <span className="badge rounded-pill bg-warning text-dark fw-bold px-2.5 py-1">Đang chế biến</span>;
-                    }
-                    if (st === 'confirmed') {
-                      return (
-                        <span className="badge rounded-pill bg-primary bg-opacity-10 text-primary border border-primary px-2.5 py-1">
-                          Đã chuyển Bếp/Bar
-                        </span>
-                      );
-                    }
-                    return <span className="badge rounded-pill bg-secondary text-white px-2.5 py-1">Chờ xác nhận</span>;
-                  };
+              {profileSubModal === 'SOP' && (
+                <div className="small text-dark d-flex flex-column gap-2">
+                  <div className="p-3 rounded-3 bg-light border">
+                    <b className="text-primary">1. Quy trình duyệt đơn khách quét QR:</b>
+                    <div className="text-secondary mt-1">
+                      Kiểm tra lại danh sách món với khách tại bàn. Nếu khách gọi nhầm hoặc muốn thêm món, bấm vào thẻ đơn để sửa trực tiếp trước khi bấm <b>Xác nhận đơn</b>.
+                    </div>
+                  </div>
+                  <div className="p-3 rounded-3 bg-light border">
+                    <b className="text-primary">2. Xử lý khi Bếp báo hết món:</b>
+                    <div className="text-secondary mt-1">
+                      Thông báo ngay cho khách để chọn <b>Đổi món khác</b> hoặc bấm <b>Báo hủy món</b> để Thu ngân cập nhật lại hóa đơn.
+                    </div>
+                  </div>
+                  <div className="p-3 rounded-3 bg-light border">
+                    <b className="text-primary">3. Nhận món tại Trạm Tiếp Thực (PASS):</b>
+                    <div className="text-secondary mt-1">
+                      Kiểm tra đúng số bàn và ghi chú chế biến trước khi bưng món ra bàn và bấm xác nhận <b>Đã lên</b>.
+                    </div>
+                  </div>
+                </div>
+              )}
 
-                  return (
-                    <div>
-                      {/* Nếu có đơn đang chờ duyệt thì hiện nút duyệt nhanh ở trên cùng */}
-                      {pendingConfirmOrders.map(pOrd => (
-                        <div
-                          key={pOrd.id}
-                          className="p-2.5 mb-2.5 rounded-3 bg-warning bg-opacity-10 border border-warning d-flex justify-content-between align-items-center"
-                        >
-                          <span className="small fw-bold text-dark">
-                            Đơn mới: {pOrd.order_code || `ORD-${pOrd.id}`}
-                          </span>
-                          <button
-                            onClick={() => handleConfirmOrder(pOrd.id)}
-                            className="btn btn-xs btn-warning fw-bold rounded-pill px-3 py-1"
-                          >
-                            Xác nhận đơn
-                          </button>
-                        </div>
-                      ))}
+              {profileSubModal === 'FEEDBACK' && (
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    showToast('Đã gửi báo cáo lên Quản lý & Thu ngân!');
+                    setFeedbackText('');
+                    setProfileSubModal(null);
+                  }}
+                >
+                  <label className="form-label small fw-bold">Nội dung sự cố / góp ý vận hành:</label>
+                  <textarea
+                    rows={4}
+                    required
+                    value={feedbackText}
+                    onChange={(e) => setFeedbackText(e.target.value)}
+                    placeholder="VD: Bàn 05 hỏng mã QR, máy in khu Bếp hết giấy..."
+                    className="form-control rounded-3 mb-3"
+                  />
+                  <button type="submit" className="btn btn-primary w-100 rounded-pill fw-bold py-2">
+                    Gửi báo cáo ngay
+                  </button>
+                </form>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
-                      {/* Danh sách món ăn đã gom gọn của bàn */}
-                      <div className="d-flex flex-column gap-2">
-                        {mergedList.map((it, idx) => {
-                          const waitingCancel = requestedCancelIds.includes(it.id);
-                          return (
-                            <div
-                              key={it.id || idx}
-                              className={`p-2.5 rounded-3 border ${
-                                it.isOut ? 'bg-danger bg-opacity-10 border-danger' : 'bg-white shadow-xs'
-                              }`}
-                            >
-                              <div className="d-flex justify-content-between align-items-center gap-2">
-                                <span
-                                  className={`fw-bold ${
-                                    it.isOut ? 'text-danger text-decoration-line-through' : 'text-dark'
-                                  }`}
-                                  style={{ fontSize: '14.5px' }}
-                                >
-                                  <b className="text-danger me-1.5">{it.quantity}x</b>
-                                  {it.name}
+      {/* ================================================================= */}
+      {/* POPUP 1: CHI TIẾT & SỬA ORDER CỦA BÀN (DÙNG CHUNG CHO CẢ ĐƠN CHỜ DUYỆT & BÀN ĂN) */}
+      {/* ================================================================= */}
+      {viewingTable && (
+        <div className="staff-popup-backdrop" onClick={() => setViewingTable(null)}>
+          <div className="staff-popup-sheet" onClick={e => e.stopPropagation()}>
+            <div className="staff-popup-header">
+              <div>
+                <h6 className="fw-bolder mb-0 text-white" style={{ fontSize: '16.5px' }}>
+                  Chi tiết & Sửa Order • {viewingTable.table_number}
+                </h6>
+                <small className="text-white-50" style={{ fontSize: '12px' }}>
+                  Tăng/giảm số lượng, đổi món, xóa món hoặc thêm món mới
+                </small>
+              </div>
+              <button
+                type="button"
+                onClick={() => setViewingTable(null)}
+                className="staff-popup-close-btn"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {(() => {
+              const tOrders = orders.filter(
+                o =>
+                  (o.table_id === viewingTable.id || o.table_name === viewingTable.table_number) &&
+                  !['completed', 'cancelled', 'paid'].includes(String(o.status).toLowerCase())
+              );
+              const firstActiveOrder = tOrders[0];
+
+              const tableGrandTotal = tOrders.reduce((sumOrd, ord) => {
+                const validItems = (ord.items || ord.order_items || []).filter(
+                  i => String(i.item_status || i.status || '').toLowerCase() !== 'cancelled' && !isItemOutOfStock(i)
+                );
+                return sumOrd + validItems.reduce((s, it) => s + getItemUnitPrice(it) * Number(it.quantity || 1), 0);
+              }, 0);
+
+              return (
+                <>
+                  <div className="px-3 py-2 bg-white border-bottom d-flex justify-content-between align-items-center gap-2">
+                    <span className="badge rounded-pill bg-light text-secondary border px-3 py-1.5 fw-bold" style={{ fontSize: '12px' }}>
+                      {tOrders.length > 0 ? `Đang có ${tOrders.length} lượt gọi món` : 'Bàn đang trống'}
+                    </span>
+
+                    <button
+                      onClick={() =>
+                        setAddingToTarget({
+                          orderId: firstActiveOrder?.id || null,
+                          tableId: viewingTable.id,
+                          tableName: viewingTable.table_number,
+                          orderCode: firstActiveOrder?.order_code || ''
+                        })
+                      }
+                      className="btn btn-primary btn-sm rounded-pill px-3 py-1.5 fw-bold d-inline-flex align-items-center gap-1 shadow-sm text-nowrap"
+                      style={{ fontSize: '12.5px' }}
+                    >
+                      <Plus size={15} /> Thêm món mới
+                    </button>
+                  </div>
+
+                  <div className="staff-popup-body">
+                    {tOrders.length === 0 ? (
+                      <div className="bg-white rounded-4 border p-4 text-center text-muted my-2">
+                        <Utensils size={36} className="text-primary opacity-25 mb-2" />
+                        <div className="fw-bold text-dark">Bàn này hiện chưa gọi món</div>
+                        <small>Bấm nút <b>+ Thêm món mới</b> ở góc trên để tạo đơn hộ khách.</small>
+                      </div>
+                    ) : (
+                      tOrders.map(ord => {
+                        const isPending = String(ord.status).toLowerCase() === 'pending';
+                        const activeItems = (ord.items || ord.order_items || []).filter(
+                          i => String(i.item_status || i.status || '').toLowerCase() !== 'cancelled'
+                        );
+
+                        if (activeItems.length === 0) return null;
+
+                        return (
+                          <div key={ord.id} className="bg-white rounded-4 border p-3 mb-2 shadow-sm">
+                            <div className="d-flex justify-content-between align-items-center pb-2 mb-2 border-bottom">
+                              <div>
+                                <span className="text-secondary small fw-semibold">Mã phiếu: </span>
+                                <span className="fw-bolder text-primary" style={{ fontSize: '14px' }}>
+                                  {ord.order_code || `ORD-${ord.id}`}
                                 </span>
-                                {renderBadgeVN(it.effectiveStatus)}
                               </div>
-
-                              {it.note && (
-                                <div className="small text-muted mt-1">Ghi chú: {it.note}</div>
-                              )}
-
-                              {/* Chỉ khi món bị hết, nhân viên mới có nút Đổi món hoặc Báo khách hủy */}
-                              {it.isOut && (
-                                <div className="d-flex gap-2 mt-2 pt-2 border-top border-danger border-opacity-25">
-                                  <button
-                                    onClick={() =>
-                                      setSwappingItem({
-                                        ...it,
-                                        table_name: viewingTable.table_number,
-                                        order_id: it.order_id
-                                      })
-                                    }
-                                    className="btn btn-xs btn-primary fw-bold flex-fill rounded-pill py-1"
-                                  >
-                                    🔄 Đổi món khác
-                                  </button>
-                                  {waitingCancel ? (
-                                    <span className="badge bg-warning text-dark d-flex align-items-center px-2">
-                                      Đã báo Thu ngân xóa
-                                    </span>
-                                  ) : (
-                                    <button
-                                      onClick={() =>
-                                        handleRequestCashierCancelItem(
-                                          it,
-                                          viewingTable.table_number,
-                                          it.order_code
-                                        )
-                                      }
-                                      className="btn btn-xs btn-outline-danger fw-bold flex-fill rounded-pill py-1"
-                                    >
-                                      🚫 Khách hủy (Báo Thu ngân)
-                                    </button>
-                                  )}
-                                </div>
+                              {isPending && (
+                                <button
+                                  onClick={() => handleConfirmOrder(ord.id)}
+                                  className="btn btn-warning btn-sm fw-bolder rounded-pill px-3 py-1 shadow-sm d-flex align-items-center gap-1"
+                                  style={{ fontSize: '12.5px' }}
+                                >
+                                  <Check size={14} /> Xác nhận đơn
+                                </button>
                               )}
                             </div>
-                          );
-                        })}
+
+                            <div className="d-flex flex-column gap-2">
+                              {activeItems.map((it, idx) => {
+                                const out = isItemOutOfStock(it);
+                                const st = String(it.item_status || it.status || ord.status || '').toLowerCase();
+                                const isServed = st === 'served' || st === 'completed';
+                                const uPrice = getItemUnitPrice(it);
+                                const qty = Number(it.quantity || 1);
+
+                                return (
+                                  <div key={it.id || idx} className={`staff-popup-item-card ${out ? 'out-of-stock' : ''}`}>
+                                    <div className="d-flex align-items-start gap-2">
+                                      <img
+                                        src={getItemImage(it)}
+                                        alt={it.product_name || it.name}
+                                        className="staff-popup-thumb"
+                                        onError={(e) => { e.target.src = 'https://placehold.co/200x200/e2e8f0/475569?text=Mon+An'; }}
+                                      />
+
+                                      <div className="flex-grow-1" style={{ minWidth: 0 }}>
+                                        <div className="d-flex justify-content-between align-items-start gap-1">
+                                          <div
+                                            className={`fw-bolder ${out ? 'text-danger text-decoration-line-through' : 'text-dark'}`}
+                                            style={{ fontSize: '14px', lineHeight: '1.25' }}
+                                          >
+                                            {it.product_name || it.name}
+                                          </div>
+                                          <span
+                                            className={`badge rounded-pill flex-shrink-0 ${
+                                              isServed
+                                                ? 'bg-success text-white'
+                                                : out
+                                                ? 'bg-danger text-white'
+                                                : isPending
+                                                ? 'bg-warning text-dark'
+                                                : 'bg-primary bg-opacity-10 text-primary'
+                                            }`}
+                                            style={{ fontSize: '10px', padding: '3px 7px' }}
+                                          >
+                                            {isServed ? 'Đã lên' : out ? 'Hết món' : isPending ? 'Chờ duyệt' : 'Đang phục vụ'}
+                                          </span>
+                                        </div>
+
+                                        <div className="d-flex justify-content-between align-items-center mt-1">
+                                          <span className="text-muted" style={{ fontSize: '11.5px' }}>
+                                            {uPrice.toLocaleString()}đ / phần
+                                          </span>
+                                          <span className="fw-bolder text-primary" style={{ fontSize: '13px' }}>
+                                            {(uPrice * qty).toLocaleString()}đ
+                                          </span>
+                                        </div>
+
+                                        {!isServed && (
+                                          <div className="d-flex justify-content-between align-items-center mt-2 pt-2 border-top">
+                                            <div className="d-flex align-items-center gap-1">
+                                              <button
+                                                onClick={() => handleStaffAdjustItemQty(it, -1, viewingTable.table_number)}
+                                                className="staff-qty-btn"
+                                              >
+                                                <Minus size={12} />
+                                              </button>
+                                              <span className="fw-bolder text-danger px-1" style={{ fontSize: '14px', minWidth: '22px', textAlign: 'center' }}>
+                                                {qty}
+                                              </span>
+                                              <button
+                                                onClick={() => handleStaffAdjustItemQty(it, 1, viewingTable.table_number)}
+                                                disabled={out}
+                                                className="staff-qty-btn primary"
+                                              >
+                                                <Plus size={12} />
+                                              </button>
+                                            </div>
+
+                                            <div className="d-flex align-items-center gap-1">
+                                              <button
+                                                onClick={() => setSwappingItem({ ...it, table_name: viewingTable.table_number, order_id: ord.id })}
+                                                className="staff-action-pill swap"
+                                              >
+                                                <Repeat size={12} /> Đổi
+                                              </button>
+                                              <button
+                                                onClick={() => setConfirmDeletePopup({ item: it, tableName: viewingTable.table_number })}
+                                                className="staff-action-pill delete"
+                                              >
+                                                <Trash2 size={12} /> Xóa
+                                              </button>
+                                            </div>
+                                          </div>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+
+                  <div className="staff-popup-footer">
+                    <div>
+                      <div className="text-secondary" style={{ fontSize: '11.5px' }}>Tổng tạm tính {viewingTable.table_number}:</div>
+                      <div className="fw-bolder text-danger" style={{ fontSize: '18px' }}>
+                        {tableGrandTotal.toLocaleString()}đ
                       </div>
                     </div>
-                  );
-                })()}
-              </div>
+                    <button
+                      onClick={() => setViewingTable(null)}
+                      className="btn btn-secondary fw-bolder px-4 py-2 rounded-pill"
+                      style={{ fontSize: '13.5px' }}
+                    >
+                      Đóng lại
+                    </button>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        </div>
+      )}
 
-              <div className="modal-footer bg-light py-2">
-                <button
-                  onClick={() => setViewingTable(null)}
-                  className="btn btn-sm btn-secondary fw-bold px-4 rounded-pill"
-                >
-                  Đóng
-                </button>
+      {/* POPUP 2: THÊM MÓN MỚI VÀO ĐƠN HOẶC BÀN */}
+      {addingToTarget && (
+        <div className="staff-popup-backdrop" style={{ zIndex: 3100 }} onClick={() => setAddingToTarget(null)}>
+          <div className="staff-popup-sheet" onClick={e => e.stopPropagation()}>
+            <div className="staff-popup-header">
+              <div>
+                <h6 className="fw-bolder mb-0 text-white" style={{ fontSize: '16px' }}>
+                  ➕ Thêm Món Vào {addingToTarget.tableName}
+                </h6>
+                <small className="text-white-50" style={{ fontSize: '12px' }}>
+                  {addingToTarget.orderCode ? `Bổ sung vào phiếu ${addingToTarget.orderCode}` : 'Chọn món bên dưới để thêm ngay'}
+                </small>
+              </div>
+              <button type="button" onClick={() => setAddingToTarget(null)} className="staff-popup-close-btn">
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="p-3 bg-white border-bottom">
+              <div className="input-group input-group-sm mb-2">
+                <span className="input-group-text bg-light border-end-0 rounded-start-pill ps-3">
+                  <Search size={14} className="text-secondary" />
+                </span>
+                <input
+                  type="text"
+                  value={addSearch}
+                  onChange={(e) => setAddSearch(e.target.value)}
+                  placeholder="Tìm nhanh tên món cần thêm..."
+                  className="form-control bg-light border-start-0 rounded-end-pill shadow-none"
+                />
+              </div>
+              <div className="d-flex gap-2 overflow-auto pb-1" style={{ scrollbarWidth: 'none' }}>
+                {categories.map(cat => (
+                  <button
+                    key={cat}
+                    onClick={() => setAddCategory(cat)}
+                    className={`btn btn-sm rounded-pill px-3 py-1 fw-bold flex-shrink-0 border-0 ${
+                      addCategory === cat ? 'bg-primary text-white' : 'bg-light text-secondary'
+                    }`}
+                    style={{ fontSize: '12px' }}
+                  >
+                    {cat}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="staff-popup-body">
+              <div className="d-flex flex-column gap-2">
+                {filteredProductsForAdd.map(prod => (
+                  <div key={prod.id} className="p-2 rounded-4 border bg-white d-flex justify-content-between align-items-center gap-2 shadow-sm">
+                    <div className="d-flex align-items-center gap-2" style={{ minWidth: 0 }}>
+                      <img
+                        src={getProductImageUrl(prod)}
+                        alt={prod.name}
+                        className="rounded-3 border object-fit-cover flex-shrink-0"
+                        style={{ width: '52px', height: '52px' }}
+                        onError={(e) => { e.target.src = 'https://placehold.co/200x200/e2e8f0/475569?text=Mon+An'; }}
+                      />
+                      <div style={{ minWidth: 0 }}>
+                        <div className="fw-bolder text-dark text-truncate" style={{ fontSize: '14px' }}>{prod.name}</div>
+                        <small className="text-primary fw-bolder">{Number(prod.price || 0).toLocaleString()}đ</small>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => handleStaffAddProductToTarget(prod)}
+                      className="btn btn-sm btn-primary fw-bold rounded-pill px-3 py-1.5 flex-shrink-0 shadow-sm"
+                      style={{ fontSize: '12.5px' }}
+                    >
+                      + Thêm
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="staff-popup-footer justify-content-end">
+              <button onClick={() => setAddingToTarget(null)} className="btn btn-primary fw-bolder rounded-pill px-4 py-2">
+                Hoàn tất
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* POPUP 3: CHỌN MÓN MỚI ĐỂ ĐỔI CHO KHÁCH */}
+      {swappingItem && (
+        <div className="staff-popup-backdrop" style={{ zIndex: 3200 }} onClick={() => setSwappingItem(null)}>
+          <div className="staff-popup-sheet" onClick={e => e.stopPropagation()}>
+            <div className="staff-popup-header">
+              <div>
+                <h6 className="fw-bolder mb-0 text-white" style={{ fontSize: '16px' }}>
+                  🔄 Đổi Món Cho Khách • {swappingItem.table_name}
+                </h6>
+                <small className="text-white-50" style={{ fontSize: '12px' }}>
+                  Món hiện tại: {swappingItem.product_name || swappingItem.name}
+                </small>
+              </div>
+              <button type="button" onClick={() => setSwappingItem(null)} className="staff-popup-close-btn">
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="p-3 bg-white border-bottom">
+              <div className="input-group input-group-sm">
+                <span className="input-group-text bg-light border-end-0 rounded-start-pill ps-3">
+                  <Search size={14} className="text-secondary" />
+                </span>
+                <input
+                  type="text"
+                  value={swapSearch}
+                  onChange={(e) => setSwapSearch(e.target.value)}
+                  placeholder="Tìm món mới để đổi..."
+                  className="form-control bg-light border-start-0 rounded-end-pill shadow-none"
+                />
+              </div>
+            </div>
+
+            <div className="staff-popup-body">
+              <div className="d-flex flex-column gap-2">
+                {availableProductsForSwap.map(prod => (
+                  <div key={prod.id} className="p-2 rounded-4 border bg-white d-flex justify-content-between align-items-center gap-2 shadow-sm">
+                    <div className="d-flex align-items-center gap-2" style={{ minWidth: 0 }}>
+                      <img
+                        src={getProductImageUrl(prod)}
+                        alt={prod.name}
+                        className="rounded-3 border object-fit-cover flex-shrink-0"
+                        style={{ width: '52px', height: '52px' }}
+                        onError={(e) => { e.target.src = 'https://placehold.co/200x200/e2e8f0/475569?text=Mon+An'; }}
+                      />
+                      <div style={{ minWidth: 0 }}>
+                        <div className="fw-bolder text-dark text-truncate" style={{ fontSize: '14px' }}>{prod.name}</div>
+                        <small className="text-primary fw-bolder">{Number(prod.price || 0).toLocaleString()}đ</small>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => handleConfirmSwapItem(prod)}
+                      className="btn btn-sm btn-success fw-bold rounded-pill px-3 py-1.5 flex-shrink-0 shadow-sm"
+                      style={{ fontSize: '12.5px' }}
+                    >
+                      Chọn đổi
+                    </button>
+                  </div>
+                ))}
               </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* MODAL CHỌN MÓN MỚI ĐỂ ĐỔI CHO KHÁCH */}
-      {swappingItem && (
-        <div className="modal d-block" style={{ backgroundColor: 'rgba(15, 23, 42, 0.75)', zIndex: 2500 }} onClick={() => setSwappingItem(null)}>
-          <div className="modal-dialog modal-dialog-centered mx-3" onClick={e => e.stopPropagation()}>
-            <div className="modal-content rounded-4 border-0 shadow-lg overflow-hidden">
-              <div className="modal-header bg-primary text-white py-3">
-                <div>
-                  <h6 className="modal-title fw-bold mb-0">Đổi Món Cho Khách • {swappingItem.table_name}</h6>
-                  <small className="opacity-75">Món hết: {swappingItem.product_name || swappingItem.name}</small>
+      {/* POPUP 4: XÁC NHẬN XÓA MÓN */}
+      {confirmDeletePopup && (
+        <div className="staff-popup-backdrop" style={{ zIndex: 3500 }} onClick={() => setConfirmDeletePopup(null)}>
+          <div
+            className="bg-white rounded-4 shadow-lg p-4 mx-3 text-center staff-confirm-dialog"
+            style={{ width: '100%', maxWidth: '360px' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div
+              className="rounded-circle bg-danger bg-opacity-10 text-danger d-inline-flex align-items-center justify-content-center mb-3"
+              style={{ width: '56px', height: '56px' }}
+            >
+              <Trash2 size={26} />
+            </div>
+            <h6 className="fw-bolder text-dark mb-1" style={{ fontSize: '17px' }}>
+              Xác nhận xóa món?
+            </h6>
+            <p className="text-secondary small mb-3">
+              Bạn có chắc muốn xóa món này khỏi đơn của <b>{confirmDeletePopup.tableName}</b> không?
+            </p>
+
+            <div className="p-2 rounded-3 bg-light border d-flex align-items-center gap-2 text-start mb-3">
+              <img
+                src={getItemImage(confirmDeletePopup.item)}
+                alt=""
+                className="rounded-2 border object-fit-cover flex-shrink-0"
+                style={{ width: '44px', height: '44px' }}
+              />
+              <div style={{ minWidth: 0 }}>
+                <div className="fw-bolder text-dark text-truncate" style={{ fontSize: '14px' }}>
+                  {confirmDeletePopup.item.quantity}x {confirmDeletePopup.item.product_name || confirmDeletePopup.item.name}
                 </div>
-                <button type="button" className="btn-close btn-close-white" onClick={() => setSwappingItem(null)} />
+                <small className="text-danger fw-bold">
+                  {(getItemUnitPrice(confirmDeletePopup.item) * Number(confirmDeletePopup.item.quantity || 1)).toLocaleString()}đ
+                </small>
               </div>
-              <div className="modal-body p-3" style={{ maxHeight: '60vh', overflowY: 'auto' }}>
-                <div className="small fw-bold text-muted mb-2">Chọn món còn hàng bên dưới để thay thế:</div>
-                <div className="d-flex flex-column gap-2">
-                  {availableProductsForSwap.map(prod => (
-                    <div key={prod.id} className="p-2.5 rounded-3 border bg-white d-flex justify-content-between align-items-center">
-                      <div>
-                        <div className="fw-bold text-dark">{prod.name}</div>
-                        <small className="text-primary fw-bold">{Number(prod.price || 0).toLocaleString()}đ</small>
-                      </div>
-                      <button
-                        onClick={() => handleConfirmSwapItem(prod)}
-                        className="btn btn-sm btn-success fw-bold rounded-pill px-3"
-                      >
-                        Chọn đổi
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
+            </div>
+
+            <div className="d-flex gap-2">
+              <button
+                onClick={() => setConfirmDeletePopup(null)}
+                className="btn btn-light border fw-bold flex-fill py-2 rounded-pill"
+              >
+                Hủy bỏ
+              </button>
+              <button
+                onClick={executeDeleteWrongItem}
+                className="btn btn-danger fw-bolder flex-fill py-2 rounded-pill shadow-sm"
+              >
+                Đồng ý xóa
+              </button>
             </div>
           </div>
         </div>
@@ -893,9 +1900,10 @@ export default function StaffDashboard() {
         </button>
 
         <button
-          onClick={() => setBottomNav('HOME')}
+          onClick={() => { setBottomNav('HOME'); setActiveTab('TABLES'); }}
           className="btn btn-primary rounded-circle d-flex align-items-center justify-content-center shadow"
           style={{ width: '48px', height: '48px', marginTop: '-18px' }}
+          title="Sơ đồ bàn"
         >
           <QrCode size={22} className="text-white" />
         </button>
@@ -908,6 +1916,323 @@ export default function StaffDashboard() {
           <span style={{ fontSize: '11px' }}>Cá nhân</span>
         </button>
       </div>
+
+      {/* ================================================================= */}
+      {/* CSS CHUẨN: PADDING THOÁNG ĐẸP • THẺ RÚT GỌN • TRANG CÁ NHÂN GIỐNG ẢNH 4 */}
+      {/* ================================================================= */}
+      <style dangerouslySetInnerHTML={{__html: `
+        .spin-anim { animation: spin 1s linear infinite; }
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+
+        /* HEADER CÓ PADDING RỘNG RÃI 18PX (KHÔNG BỊ SÁT MÉP TRÁI NHƯ ẢNH 1 & 3) */
+        .staff-top-header {
+          padding: 18px 20px 14px;
+          background: linear-gradient(135deg, #003e9c 0%, #0256d4 100%);
+          color: #ffffff;
+          border-bottom-left-radius: 22px;
+          border-bottom-right-radius: 22px;
+          box-shadow: 0 4px 14px rgba(0, 62, 156, 0.18);
+        }
+        .staff-header-avatar {
+          width: 46px;
+          height: 46px;
+          border-radius: 50%;
+          background: #ffffff;
+          color: #003e9c;
+          font-weight: 800;
+          font-size: 18px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          position: relative;
+          flex-shrink: 0;
+          box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+        }
+        .staff-online-dot {
+          position: absolute;
+          bottom: 0;
+          right: 0;
+          width: 12px;
+          height: 12px;
+          border-radius: 50%;
+          background: #10b981;
+          border: 2px solid #ffffff;
+        }
+        .staff-refresh-btn {
+          width: 36px;
+          height: 36px;
+          border-radius: 50%;
+          border: none;
+          background: rgba(255, 255, 255, 0.16);
+          color: #ffffff;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        /* THẺ ĐƠN RÚT GỌN TRÊN TRANG CHỦ */
+        .staff-order-card {
+          background: #ffffff;
+          border-radius: 18px;
+          border: 1px solid #e2e8f0;
+          border-left: 5px solid #f59e0b;
+          box-shadow: 0 4px 14px rgba(15, 23, 42, 0.06);
+          overflow: hidden;
+        }
+        .staff-compact-item {
+          background: #f8fafc;
+          border: 1px solid #e2e8f0;
+          border-radius: 12px;
+          padding: 8px 12px;
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          transition: background 0.12s ease;
+        }
+        .staff-compact-item:hover {
+          background: #eff6ff;
+        }
+        .staff-compact-item.out-of-stock {
+          background: #fff1f2;
+          border-color: #fecdd3;
+        }
+        .staff-compact-thumb {
+          width: 44px;
+          height: 44px;
+          border-radius: 10px;
+          object-fit: cover;
+          border: 1px solid #cbd5e1;
+          flex-shrink: 0;
+          background: #ffffff;
+        }
+        .staff-more-items-banner {
+          width: 100%;
+          background: #eff6ff;
+          border: 1px dashed #93c5fd;
+          color: #1d4ed8;
+          border-radius: 10px;
+          padding: 8px 12px;
+          font-size: 12.5px;
+          font-weight: 600;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          transition: all 0.15s ease;
+        }
+        .staff-more-items-banner:hover {
+          background: #dbeafe;
+        }
+
+        /* TRANG CÁ NHÂN THIẾT KẾ GIỐNG HỆT ẢNH 4 */
+        .staff-profile-hero {
+          background: linear-gradient(180deg, #0047ab 0%, #003e9c 100%);
+          padding: 28px 22px 58px;
+          color: #ffffff;
+        }
+        .staff-profile-avatar-circle {
+          width: 58px;
+          height: 58px;
+          border-radius: 50%;
+          background: #ffffff;
+          color: #0047ab;
+          font-weight: 800;
+          font-size: 22px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          border: 3px solid rgba(255, 255, 255, 0.35);
+          flex-shrink: 0;
+        }
+        .staff-profile-menu-card {
+          background: #ffffff;
+          border-radius: 18px;
+          margin-top: -34px;
+          padding: 6px 14px;
+          box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+          border: 1px solid #e2e8f0;
+        }
+        .staff-profile-menu-item {
+          width: 100%;
+          background: transparent;
+          border: none;
+          border-bottom: 1px solid #f1f5f9;
+          padding: 14px 4px;
+          display: flex;
+          align-items: center;
+          gap: 14px;
+          text-align: left;
+          cursor: pointer;
+          transition: opacity 0.12s ease;
+        }
+        .staff-profile-menu-item:hover {
+          opacity: 0.85;
+        }
+        .staff-profile-icon-circle {
+          width: 36px;
+          height: 36px;
+          border-radius: 50%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          flex-shrink: 0;
+        }
+        .staff-profile-item-label {
+          flex-grow: 1;
+          font-size: 14.5px;
+          font-weight: 600;
+          color: #334155;
+        }
+        .ios-switch {
+          width: 46px;
+          height: 26px;
+          border-radius: 999px;
+          background: #cbd5e1;
+          padding: 3px;
+          display: flex;
+          align-items: center;
+          transition: background 0.2s ease;
+          flex-shrink: 0;
+        }
+        .ios-switch.active {
+          background: #22c55e;
+        }
+        .ios-switch-thumb {
+          width: 20px;
+          height: 20px;
+          border-radius: 50%;
+          background: #ffffff;
+          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+          transition: transform 0.2s ease;
+        }
+        .ios-switch.active .ios-switch-thumb {
+          transform: translateX(20px);
+        }
+
+        /* NÚT TĂNG GIẢM SỐ LƯỢNG & NÚT ĐỔI/XÓA TRONG POPUP */
+        .staff-qty-btn {
+          width: 28px;
+          height: 28px;
+          border-radius: 50%;
+          border: 1px solid #cbd5e1;
+          background: #ffffff;
+          color: #334155;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          padding: 0;
+        }
+        .staff-qty-btn.primary {
+          border-color: #93c5fd;
+          color: #1d4ed8;
+          background: #eff6ff;
+        }
+        .staff-action-pill {
+          border-radius: 999px;
+          padding: 4px 11px;
+          font-size: 12px;
+          font-weight: 700;
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          border: 1px solid transparent;
+          background: #ffffff;
+        }
+        .staff-action-pill.swap {
+          color: #1d4ed8;
+          border-color: #bfdbfe;
+          background: #eff6ff;
+        }
+        .staff-action-pill.delete {
+          color: #dc2626;
+          border-color: #fecaca;
+          background: #fef2f2;
+        }
+
+        /* POPUP HIỆN ĐẠI */
+        .staff-popup-backdrop {
+          position: fixed;
+          inset: 0;
+          background: rgba(15, 23, 42, 0.62);
+          backdrop-filter: blur(4px);
+          z-index: 2900;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 14px;
+          animation: popupFadeIn 0.18s ease-out;
+        }
+        .staff-popup-sheet {
+          width: 100%;
+          max-width: 440px;
+          max-height: 86vh;
+          background: #f8fafc;
+          border-radius: 24px;
+          box-shadow: 0 22px 48px rgba(15, 23, 42, 0.32);
+          display: flex;
+          flex-direction: column;
+          overflow: hidden;
+          animation: popupScaleUp 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        .staff-confirm-dialog {
+          animation: popupScaleUp 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        @keyframes popupFadeIn {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
+        @keyframes popupScaleUp {
+          from { opacity: 0; transform: translateY(18px) scale(0.96); }
+          to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        .staff-popup-header {
+          padding: 16px 18px;
+          background: linear-gradient(135deg, #0047ab 0%, #0d6efd 100%);
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 10px;
+        }
+        .staff-popup-close-btn {
+          width: 34px;
+          height: 34px;
+          border-radius: 50%;
+          border: none;
+          background: rgba(255, 255, 255, 0.18);
+          color: #ffffff;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          flex-shrink: 0;
+        }
+        .staff-popup-body {
+          padding: 14px 16px;
+          overflow-y: auto;
+          flex-grow: 1;
+        }
+        .staff-popup-item-card {
+          background: #f8fafc;
+          border: 1px solid #e2e8f0;
+          border-radius: 14px;
+          padding: 10px 12px;
+        }
+        .staff-popup-thumb {
+          width: 54px;
+          height: 54px;
+          border-radius: 12px;
+          object-fit: cover;
+          border: 1px solid #cbd5e1;
+          flex-shrink: 0;
+          background: #ffffff;
+        }
+        .staff-popup-footer {
+          padding: 12px 18px;
+          background: #ffffff;
+          border-top: 1px solid #e2e8f0;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+        }
+      `}} />
     </div>
   );
 }
