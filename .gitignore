@@ -1,22 +1,18 @@
-# Python & Virtual Environment
+backend/venv/
 venv/
-.venv/
 __pycache__/
 *.py[cod]
-*.log
-
-# Node & React Build
+*.sqlite3
+*.db
+frontend/node_modules/
 node_modules/
+frontend/dist/
 dist/
-.vite/
-
-# Biến môi trường chứa mật khẩu DB
 .env
-backend/.env
-frontend/.env
-
-# Hệ điều hành & Editor
+*.env
+!backend/.env.example
+*.log
+active_service_calls.json
+pos_live_alerts.json
+live_alerts_v2.json
 .DS_Store
-Thumbs.db
-.vscode/
-.idea/

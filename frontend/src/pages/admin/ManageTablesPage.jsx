@@ -1,10 +1,22 @@
+const copyTextSafe = (txt) => {
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(txt);
+  } else {
+    const el = document.createElement('textarea');
+    el.value = txt;
+    document.body.appendChild(el);
+    el.select();
+    document.execCommand('copy');
+    document.body.removeChild(el);
+  }
+};
 import React, { useState, useEffect } from 'react';
 import {
   QrCode, Plus, Layers, Users, Trash2, Edit3, RefreshCw,
   Download, Printer, Copy, Check, ExternalLink, Search, Armchair, Key, AlertTriangle 
 } from 'lucide-react';
 
-const API_BASE = 'http://127.0.0.1:8000';
+const API_BASE = 'http://192.168.100.26';
 
 const STATUS_CONFIG = {
   available: {
@@ -86,7 +98,7 @@ export default function ManageTablesPage() {
   };
 
   const handleCopyLink = (table) => {
-    navigator.clipboard.writeText(table.order_url);
+    copyTextSafe(table.order_url);
     setCopiedId(table.id);
     setTimeout(() => setCopiedId(null), 2000);
   };
@@ -565,7 +577,7 @@ export default function ManageTablesPage() {
                   <div className="fw-bold text-dark mb-1 d-flex justify-content-between align-items-center">
                     <span>Mã Token:</span>
                     <button className="btn btn-sm btn-warning py-0 px-2 fw-bold" onClick={() => {
-                      navigator.clipboard.writeText(selectedQrTable.qr_code_token);
+                      copyTextSafe(selectedQrTable.qr_code_token);
                       alert("Đã copy Token!");
                     }}>Copy</button>
                   </div>

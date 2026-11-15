@@ -1,12 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import {
-  RefreshCw, CheckCircle2, Utensils,
+import { RefreshCw, CheckCircle2, Utensils,
   QrCode, User, Home, AlertTriangle, Check, BookOpen, LogOut,
   Repeat, Ban, X, Plus, Minus, Trash2, Search, ChevronRight,
-  IdCard, Lock, FileText, MessageSquare, Bell, BarChart3, Eye
-} from 'lucide-react';
+  IdCard, Lock, FileText, MessageSquare, Bell, BarChart3, Eye, Clock } from 'lucide-react';
 
-const API_BASE = 'http://127.0.0.1:8000';
+const API_BASE = 'http://192.168.100.26';
 const MAX_PREVIEW_ITEMS = 3; // Chỉ hiển thị tối đa 3 món trên thẻ ngoài, bấm vào mở Popup xem hết
 
 export default function StaffDashboard() {
@@ -45,6 +43,8 @@ export default function StaffDashboard() {
   const [swapSearch, setSwapSearch] = useState('');
   // Popup 3: Thêm món mới vào Đơn hoặc Bàn
   const [addingToTarget, setAddingToTarget] = useState(null);
+  const [staffDraftCart, setStaffDraftCart] = useState({});
+  const [submittingStaffCart, setSubmittingStaffCart] = useState(false);
   const [addSearch, setAddSearch] = useState('');
   const [addCategory, setAddCategory] = useState('Tất cả');
   // Popup 4: Xác nhận xóa món
@@ -349,56 +349,96 @@ export default function StaffDashboard() {
     }
   };
 
-  const handleStaffAddProductToTarget = async (product) => {
-    if (!addingToTarget) return;
-    const { orderId, tableId, tableName } = addingToTarget;
-
-    try {
-      if (orderId) {
-        const res = await fetch(`${API_BASE}/api/kitchen/orders/${orderId}/add-item`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ product_id: product.id, quantity: 1 })
-        });
-
-        if (res.ok) {
-          const bc = new BroadcastChannel('smartpos_channel');
-          bc.postMessage({ type: 'STAFF_SWAPPED_ITEM', payload: { order_id: orderId } });
-          bc.close();
-          showToast(`Đã thêm +1 ${product.name} vào ${tableName}`);
-          await fetchData();
-          return;
-        }
+  const handleAdjustStaffDraftQty = (product, delta) => {
+    setStaffDraftCart(prev => {
+      const curQty = prev[product.id]?.quantity || 0;
+      const nextQty = Math.max(0, curQty + delta);
+      if (nextQty === 0) {
+        const copy = { ...prev };
+        delete copy[product.id];
+        return copy;
       }
+      return {
+        ...prev,
+        [product.id]: {
+          product_id: product.id,
+          product_name: product.name,
+          price: Number(product.price || 0),
+          quantity: nextQty
+        }
+      };
+    });
+  };
 
-      if (tableId) {
-        const resCreate = await fetch(`${API_BASE}/api/kitchen/cashier-create-order`, {
+  const handleCloseAddModal = () => {
+    setAddingToTarget(null);
+    setStaffDraftCart({});
+  };
+
+  const handleSubmitStaffDraftOrder = async () => {
+    if (!addingToTarget) return;
+    const itemsToSend = Object.values(staffDraftCart).filter(it => it.quantity > 0);
+    if (itemsToSend.length === 0) {
+      handleCloseAddModal();
+      return;
+    }
+
+    const { orderId, tableId, tableName, orderStatus } = addingToTarget;
+    setSubmittingStaffCart(true);
+    try {
+      // Nếu đang bổ sung vào một phiếu vẫn còn 'pending' (chưa duyệt) -> gộp vào phiếu đó
+      if (orderId && String(orderStatus || '').toLowerCase() === 'pending') {
+        for (const it of itemsToSend) {
+          await fetch(`${API_BASE}/api/kitchen/orders/${orderId}/add-item`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ product_id: it.product_id, quantity: it.quantity })
+          });
+        }
+      } else {
+        // Tự dò table_id nếu addingToTarget chỉ có orderId hoặc tableName
+        let resolvedTableId = tableId;
+        if (!resolvedTableId && orderId) {
+          const foundOrd = orders.find(o => o.id === orderId);
+          resolvedTableId = foundOrd?.table_id;
+        }
+        if (!resolvedTableId && tableName) {
+          const numMatch = String(tableName).match(/\d+/);
+          if (numMatch) resolvedTableId = Number(numMatch[0]);
+        }
+
+        // Bàn đã có đơn gửi Bếp -> gom tất cả món vừa chọn thành 1 PHIẾU BỔ SUNG DUY NHẤT gửi thẳng xuống Bếp/Bar
+        const res = await fetch(`${API_BASE}/api/orders`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
           body: JSON.stringify({
-            table_id: tableId,
+            table_id: resolvedTableId,
             status: 'confirmed',
-            items: [{ product_id: product.id, quantity: 1, price: product.price, unit_price: product.price }]
+            items: itemsToSend.map(it => ({
+              product_id: it.product_id,
+              product_name: it.product_name,
+              price: it.price,
+              quantity: it.quantity
+            }))
           })
         });
-
-        if (resCreate.ok) {
-          const data = await resCreate.json().catch(() => ({}));
-          if (data.order_id) {
-            setAddingToTarget(prev => ({ ...prev, orderId: data.order_id }));
-          }
-          const bc = new BroadcastChannel('smartpos_channel');
-          bc.postMessage({ type: 'CASHIER_CREATED_ORDER', payload: { table_id: tableId } });
-          bc.close();
-          showToast(`Đã thêm +1 ${product.name} cho ${tableName}`);
-          await fetchData();
-        }
+        if (!res.ok) throw new Error('Lỗi gửi phiếu bổ sung');
       }
+
+      const totalCount = itemsToSend.reduce((s, it) => s + it.quantity, 0);
+      const bc = new BroadcastChannel('smartpos_channel');
+      bc.postMessage({ type: 'CASHIER_CREATED_ORDER', payload: { table_id: tableId, order_id: orderId } });
+      bc.close();
+
+      showToast(`Đã gửi ${totalCount} món mới vào ${tableName} (1 phiếu)`);
+      handleCloseAddModal();
+      await fetchData();
     } catch (e) {
-      alert('Không thể thêm món vào bàn!');
+      alert('Không thể gửi danh sách món xuống Bếp!');
+    } finally {
+      setSubmittingStaffCart(false);
     }
   };
-
   const handleRequestCashierCancelItem = (item, tableName, orderCode) => {
     const reqObj = {
       req_id: `REQ-${Date.now()}`,
@@ -595,7 +635,7 @@ export default function StaffDashboard() {
       )}
 
       {/* KHUNG CẢNH BÁO MÓN HẾT */}
-      {bottomNav !== 'PROFILE' && outOfStockOrderItems.length > 0 && (
+      {bottomNav !== 'PROFILE' && !(bottomNav === 'HOME' && activeTab === 'ALERTS') && outOfStockOrderItems.length > 0 && (
         <div className="mx-3 mt-3 p-3 rounded-4 bg-danger bg-opacity-10 border border-danger shadow-sm">
           <div className="d-flex align-items-center gap-2 text-danger fw-bolder mb-2" style={{ fontSize: '13.5px' }}>
             <AlertTriangle size={18} />
@@ -621,7 +661,7 @@ export default function StaffDashboard() {
                         <span className="text-danger fw-bold small">Tạm hết</span>
                       </div>
                       <div className="fw-bolder text-dark mt-1" style={{ fontSize: '14.5px' }}>
-                        {item.quantity}x {item.product_name || item.name}
+                        {item.quantity} {item.product_name || item.name}
                       </div>
                     </div>
                   </div>
@@ -672,15 +712,7 @@ export default function StaffDashboard() {
               >
                 Chờ ({pendingOrders.length})
               </button>
-              <button
-                onClick={() => setActiveTab('READY')}
-                className={`btn flex-grow-1 rounded-3 fw-bolder py-2 px-1 border-0 transition-all ${
-                  activeTab === 'READY' ? 'bg-success text-white shadow-sm' : 'text-secondary'
-                }`}
-                style={{ fontSize: '12px' }}
-              >
-                Bưng ({readyToServeList.length})
-              </button>
+
               <button
                 onClick={() => setActiveTab('ALERTS')}
                 className={`btn flex-grow-1 rounded-3 fw-bolder py-2 px-1 border-0 transition-all position-relative ${
@@ -846,46 +878,6 @@ export default function StaffDashboard() {
             )}
 
             {/* 2. DANH SÁCH MÓN CHỜ BƯNG */}
-            {activeTab === 'READY' && (
-              readyToServeList.length === 0 ? (
-                <div className="bg-white rounded-4 border p-5 text-center text-muted shadow-sm">
-                  <Utensils size={40} className="text-secondary opacity-50 mb-2" />
-                  <div className="fw-bold text-dark">Chưa có món nào chờ bưng</div>
-                  <small>Các món Bếp/Bar hoàn thành sẽ hiển thị tại đây</small>
-                </div>
-              ) : (
-                readyToServeList.map(item => (
-                  <div key={item.id} className="card border-0 shadow-sm rounded-4 mb-2 border-start border-success border-4">
-                    <div className="card-body p-3 d-flex justify-content-between align-items-center gap-2">
-                      <div className="d-flex align-items-center gap-3">
-                        <img
-                          src={getItemImage(item)}
-                          alt={item.productName}
-                          className="staff-compact-thumb"
-                          style={{ width: '52px', height: '52px' }}
-                          onError={(e) => { e.target.src = 'https://placehold.co/200x200/e2e8f0/475569?text=Mon+An'; }}
-                        />
-                        <div>
-                          <span className="badge bg-primary mb-1">{item.tableName}</span>
-                          <div className="fw-bolder text-dark" style={{ fontSize: '15px' }}>
-                            <span className="text-danger me-1">{item.quantity}x</span> {item.productName}
-                          </div>
-                          {item.note && <div className="small text-danger fw-semibold">⚠️ {item.note}</div>}
-                        </div>
-                      </div>
-                      <button
-                        onClick={() => handleMarkServed(item.id)}
-                        className="btn btn-success fw-bold rounded-pill px-3 py-2 d-flex align-items-center gap-1 flex-shrink-0"
-                        style={{ fontSize: '13px' }}
-                      >
-                        <Check size={15} /> Đã lên
-                      </button>
-                    </div>
-                  </div>
-                ))
-              )
-            )}
-
             {/* TAB CẢNH BÁO RIÊNG BIỆT CHO NHÂN VIÊN */}
             {activeTab === 'ALERTS' && (
               (serviceRequests.length === 0 && outOfStockOrderItems.length === 0) ? (
@@ -949,7 +941,7 @@ export default function StaffDashboard() {
                           <span className="text-danger fw-bold small">⚠️ Bếp báo hết món</span>
                         </div>
                         <div className="fw-bolder text-dark my-1" style={{ fontSize: '15px' }}>
-                          {item.quantity}x {item.product_name || item.name}
+                          {item.quantity} {item.product_name || item.name}
                         </div>
                         {isWaitingCashier ? (
                           <div className="p-2 rounded-2 bg-warning bg-opacity-25 text-dark small fw-bold text-center mt-2">
@@ -1527,12 +1519,52 @@ export default function StaffDashboard() {
 
                         return (
                           <div key={ord.id} className="bg-white rounded-4 border p-3 mb-2 shadow-sm">
-                            <div className="d-flex justify-content-between align-items-center pb-2 mb-2 border-bottom">
-                              <div>
-                                <span className="text-secondary small fw-semibold">Mã phiếu: </span>
-                                <span className="fw-bolder text-primary" style={{ fontSize: '14px' }}>
-                                  {ord.order_code || `ORD-${ord.id}`}
-                                </span>
+                            <div className="d-flex justify-content-between align-items-center pb-2 mb-2 border-bottom flex-wrap gap-2">
+                              <div className="d-flex align-items-center gap-2 flex-wrap">
+                                <div>
+                                  <span className="text-secondary small fw-semibold">Mã phiếu: </span>
+                                  <span className="fw-bolder text-primary" style={{ fontSize: '14px' }}>
+                                    {ord.order_code || `ORD-${ord.id}`}
+                                  </span>
+                                </div>
+                                {(() => {
+                                  let savedTimes = {};
+                                  try {
+                                    savedTimes = JSON.parse(localStorage.getItem('pos_order_real_times') || '{}');
+                                  } catch {}
+                                  let rawTs =
+                                    ord.created_at ||
+                                    ord.createdAt ||
+                                    ord.ordered_at ||
+                                    ord.updated_at ||
+                                    (ord.items && ord.items[0]?.created_at) ||
+                                    savedTimes[String(ord.id)];
+                                  if (!rawTs) {
+                                    rawTs = Date.now();
+                                    try {
+                                      savedTimes[String(ord.id)] = rawTs;
+                                      localStorage.setItem('pos_order_real_times', JSON.stringify(savedTimes));
+                                    } catch {}
+                                  }
+                                  const dt = new Date(typeof rawTs === 'number' ? rawTs : String(rawTs).replace(' ', 'T'));
+                                  const timeStr = !isNaN(dt.getTime())
+                                    ? dt.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+                                    : '--:--:--';
+                                  return (
+                                    <span
+                                      className="badge rounded-pill d-inline-flex align-items-center gap-1 fw-semibold"
+                                      style={{
+                                        backgroundColor: '#eff6ff',
+                                        color: '#1d4ed8',
+                                        border: '1px solid #bfdbfe',
+                                        fontSize: '11px',
+                                        padding: '3px 8px'
+                                      }}
+                                    >
+                                      <Clock size={11} /> Lúc {timeStr}
+                                    </span>
+                                  );
+                                })()}
                               </div>
                               {isPending && (
                                 <button
@@ -1588,15 +1620,15 @@ export default function StaffDashboard() {
                                         </div>
 
                                         <div className="d-flex justify-content-between align-items-center mt-1">
-                                          <span className="text-muted" style={{ fontSize: '11.5px' }}>
-                                            {uPrice.toLocaleString()}đ / phần
+                                          <span className="text-muted" style={{ fontSize: '12px' }}>
+                                            Số lượng: <b className="text-danger">{qty}</b> • {uPrice.toLocaleString()}đ / phần
                                           </span>
-                                          <span className="fw-bolder text-primary" style={{ fontSize: '13px' }}>
+                                          <span className="fw-bolder text-primary" style={{ fontSize: '13.5px' }}>
                                             {(uPrice * qty).toLocaleString()}đ
                                           </span>
                                         </div>
 
-                                        {!isServed && (
+                                        {isPending && (
                                           <div className="d-flex justify-content-between align-items-center mt-2 pt-2 border-top">
                                             <div className="d-flex align-items-center gap-1">
                                               <button
@@ -1669,7 +1701,7 @@ export default function StaffDashboard() {
 
       {/* POPUP 2: THÊM MÓN MỚI VÀO ĐƠN HOẶC BÀN */}
       {addingToTarget && (
-        <div className="staff-popup-backdrop" style={{ zIndex: 3100 }} onClick={() => setAddingToTarget(null)}>
+        <div className="staff-popup-backdrop" style={{ zIndex: 3100 }} onClick={handleCloseAddModal}>
           <div className="staff-popup-sheet" onClick={e => e.stopPropagation()}>
             <div className="staff-popup-header">
               <div>
@@ -1680,7 +1712,7 @@ export default function StaffDashboard() {
                   {addingToTarget.orderCode ? `Bổ sung vào phiếu ${addingToTarget.orderCode}` : 'Chọn món bên dưới để thêm ngay'}
                 </small>
               </div>
-              <button type="button" onClick={() => setAddingToTarget(null)} className="staff-popup-close-btn">
+              <button type="button" onClick={handleCloseAddModal} className="staff-popup-close-btn">
                 <X size={18} />
               </button>
             </div>
@@ -1731,22 +1763,82 @@ export default function StaffDashboard() {
                         <small className="text-primary fw-bolder">{Number(prod.price || 0).toLocaleString()}đ</small>
                       </div>
                     </div>
-                    <button
-                      onClick={() => handleStaffAddProductToTarget(prod)}
-                      className="btn btn-sm btn-primary fw-bold rounded-pill px-3 py-1.5 flex-shrink-0 shadow-sm"
-                      style={{ fontSize: '12.5px' }}
-                    >
-                      + Thêm
-                    </button>
+                    {(() => {
+                      const draftQty = staffDraftCart[prod.id]?.quantity || 0;
+                      return (
+                        <div className="d-flex align-items-center gap-1.5 flex-shrink-0 bg-light rounded-pill p-1 border">
+                          <button
+                            type="button"
+                            disabled={draftQty === 0}
+                            onClick={() => handleAdjustStaffDraftQty(prod, -1)}
+                            className="btn btn-sm rounded-circle fw-bolder d-flex align-items-center justify-content-center p-0"
+                            style={{
+                              width: '28px',
+                              height: '28px',
+                              backgroundColor: draftQty === 0 ? '#e2e8f0' : '#ffffff',
+                              color: draftQty === 0 ? '#94a3b8' : '#0f172a',
+                              border: '1px solid #cbd5e1'
+                            }}
+                          >
+                            -
+                          </button>
+                          <span
+                            className="fw-bolder text-center"
+                            style={{ minWidth: '24px', fontSize: '13.5px', color: draftQty > 0 ? '#2563eb' : '#64748b' }}
+                          >
+                            {draftQty}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleAdjustStaffDraftQty(prod, 1)}
+                            className="btn btn-sm btn-primary rounded-circle fw-bolder d-flex align-items-center justify-content-center p-0"
+                            style={{ width: '28px', height: '28px' }}
+                          >
+                            +
+                          </button>
+                        </div>
+                      );
+                    })()}
                   </div>
                 ))}
               </div>
             </div>
 
-            <div className="staff-popup-footer justify-content-end">
-              <button onClick={() => setAddingToTarget(null)} className="btn btn-primary fw-bolder rounded-pill px-4 py-2">
-                Hoàn tất
-              </button>
+            <div className="staff-popup-footer justify-content-between align-items-center">
+              {(() => {
+                const selectedList = Object.values(staffDraftCart);
+                const totalSelectedQty = selectedList.reduce((s, it) => s + it.quantity, 0);
+                const totalSelectedMoney = selectedList.reduce((s, it) => s + it.price * it.quantity, 0);
+                return (
+                  <>
+                    <div>
+                      <div className="text-secondary" style={{ fontSize: '11.5px' }}>
+                        Đã chọn thêm: <b className="text-primary">{totalSelectedQty} phần</b>
+                      </div>
+                      <div className="fw-bolder text-dark" style={{ fontSize: '15px' }}>
+                        {totalSelectedMoney.toLocaleString()}đ
+                      </div>
+                    </div>
+                    <div className="d-flex gap-2">
+                      <button
+                        type="button"
+                        onClick={handleCloseAddModal}
+                        className="btn btn-light border fw-bold rounded-pill px-3 py-2"
+                      >
+                        Hủy
+                      </button>
+                      <button
+                        type="button"
+                        disabled={submittingStaffCart}
+                        onClick={handleSubmitStaffDraftOrder}
+                        className="btn btn-primary fw-bolder rounded-pill px-4 py-2 shadow-sm"
+                      >
+                        {submittingStaffCart ? 'Đang gửi...' : totalSelectedQty > 0 ? `Hoàn tất (${totalSelectedQty})` : 'Hoàn tất'}
+                      </button>
+                    </div>
+                  </>
+                );
+              })()}
             </div>
           </div>
         </div>
@@ -1847,7 +1939,7 @@ export default function StaffDashboard() {
               />
               <div style={{ minWidth: 0 }}>
                 <div className="fw-bolder text-dark text-truncate" style={{ fontSize: '14px' }}>
-                  {confirmDeletePopup.item.quantity}x {confirmDeletePopup.item.product_name || confirmDeletePopup.item.name}
+                  {confirmDeletePopup.item.quantity} {confirmDeletePopup.item.product_name || confirmDeletePopup.item.name}
                 </div>
                 <small className="text-danger fw-bold">
                   {(getItemUnitPrice(confirmDeletePopup.item) * Number(confirmDeletePopup.item.quantity || 1)).toLocaleString()}đ

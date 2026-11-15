@@ -6,7 +6,7 @@ import {
   Bell, Ban, Lock, Wallet, QrCode, HelpCircle
 } from 'lucide-react';
 
-const API_BASE = 'http://127.0.0.1:8000';
+const API_BASE = 'http://192.168.100.26';
 
 export default function CustomerMenu() {
   const [searchParams] = useSearchParams();
@@ -372,6 +372,7 @@ export default function CustomerMenu() {
       const orderPayload = {
         table_id: tableInfo.id,
         customer_note: note,
+        qr_code_token: token || tableInfo?.qr_code_token || '',
         items: cart.map(item => ({
           product_id: item.id,
           quantity: item.qty,

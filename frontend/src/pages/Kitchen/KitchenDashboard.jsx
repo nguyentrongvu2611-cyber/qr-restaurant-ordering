@@ -5,7 +5,7 @@ import {
   History, Utensils, ChefHat, Eye, Wine
 } from 'lucide-react';
 
-const API_BASE = 'http://127.0.0.1:8000';
+const API_BASE = 'http://192.168.100.26';
 
 // Bảng màu cho danh sách "Tất cả món cần nấu / cần pha" ở cột phải
 const SUMMARY_PALETTES = [
@@ -407,6 +407,7 @@ export default function KitchenDashboard() {
 
   // DỮ LIỆU LUỒNG PHỤC VỤ NHANH (GOM THEO TỪNG PHIẾU ORDER GỌN ĐẸP, KHÔNG XÉ LẺ TỪNG LON)
   const barFastTickets = useMemo(() => {
+    const fastBatchCounter = {};
     return enrichedOrders
       .map(order => {
         const fItems = order.enrichedItems.filter(it => it.flowType === 'BAR_FAST');
@@ -417,7 +418,17 @@ export default function KitchenDashboard() {
         };
       })
       .filter(o => o.activeFastItems.length > 0)
-      .map((o, idx) => ({ ...o, seqNumber: idx + 1 }));
+      .map((o, idx) => {
+        const tKey = String(o.tableName || o.table_id || '').trim();
+        fastBatchCounter[tKey] = (fastBatchCounter[tKey] || 0) + 1;
+        const bNum = Math.max(o.batchNumber || 1, fastBatchCounter[tKey]);
+        return {
+          ...o,
+          seqNumber: idx + 1,
+          batchNumber: bNum,
+          isAddOnBatch: bNum > 1
+        };
+      });
   }, [enrichedOrders]);
 
   const barFastItems = useMemo(() => {
@@ -474,7 +485,7 @@ export default function KitchenDashboard() {
 
     setLocalServedItemIds(prev => [...new Set([...prev, ...itemIds])]);
 
-    const summaryText = itemsToServe.map(i => `${i.quantity}x ${i.product_name || i.name}`).join(', ');
+    const summaryText = itemsToServe.map(i => `${i.quantity} ${i.product_name || i.name}`).join(', ');
     const actionId = `ACT-${Date.now()}`;
 
     const newAction = {
@@ -751,7 +762,7 @@ export default function KitchenDashboard() {
                         <div className="flex-grow-1 pe-1" style={{ minWidth: 0 }}>
                           <div className="d-flex align-items-baseline gap-1">
                             <span className="fw-bolder text-danger flex-shrink-0" style={{ fontSize: '13.5px' }}>
-                              {item.quantity}x
+                              {item.quantity}
                             </span>
                             <span className="fw-bold text-dark" style={{ fontSize: '13px', lineHeight: '1.22', wordBreak: 'break-word' }}>
                               {item.product_name || item.name}
@@ -1120,7 +1131,13 @@ export default function KitchenDashboard() {
                     groupedMap[gKey].items.push(item);
                   });
 
-                  const fastTickets = Object.values(groupedMap);
+                  const fastTableCounter = {};
+                  const fastTickets = Object.values(groupedMap).map(t => {
+                    const tName = String(t.tableName || '').trim();
+                    fastTableCounter[tName] = (fastTableCounter[tName] || 0) + 1;
+                    const bNum = Math.max(t.batchNumber || 1, fastTableCounter[tName]);
+                    return { ...t, batchNumber: bNum, isAddOnBatch: bNum > 1 };
+                  });
 
                   return fastTickets.map((ticket, idx) => {
                     const currentWaiter = selectedWaiterByTicket[ticket.ticketKey] || defaultWaiterName;
@@ -1171,7 +1188,7 @@ export default function KitchenDashboard() {
                               <div className="flex-grow-1 pe-1" style={{ minWidth: 0 }}>
                                 <div className="d-flex align-items-baseline gap-1">
                                   <span className="fw-bolder text-danger flex-shrink-0" style={{ fontSize: '13.5px' }}>
-                                    {item.quantity}x
+                                    {item.quantity}
                                   </span>
                                   <span className="fw-bold text-dark" style={{ fontSize: '13px', lineHeight: '1.22', wordBreak: 'break-word' }}>
                                     {item.product_name || item.name}

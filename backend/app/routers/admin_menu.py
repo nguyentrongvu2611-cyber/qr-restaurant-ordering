@@ -1,3 +1,5 @@
+from app.core.security import require_admin
+from app.core.security import require_admin
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.core.database import get_db
@@ -5,7 +7,7 @@ from app.models.category import Category
 from app.models.menu_item import Product
 from app.schemas.admin_schema import CategoryCreate, CategoryUpdate, ProductCreate, ProductUpdate
 
-router = APIRouter(prefix="/api/admin", tags=["Admin Menu & Categories"])
+router = APIRouter(dependencies=[Depends(require_admin)], prefix="/api/admin", tags=["Admin Menu & Categories"])
 
 # ================= DANH MỤC (CATEGORIES) =================
 @router.get("/categories")

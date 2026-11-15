@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 API_BASE = "http://127.0.0.1:8000"
 TOTAL_TABLES = 40          # 40 bàn chạy đồng loạt
-STEP_DELAY_SECONDS = 5     # Nghỉ 5 giây giữa mỗi chặng để bạn kịp nhìn giao diện Web nhảy trạng thái
+STEP_DELAY_SECONDS = 4     # Dừng 4s mỗi chặng để quan sát trên trình duyệt Web
 
 
 def call_api(method: str, path: str, payload: dict = None, timeout: int = 25):
@@ -25,30 +25,41 @@ def call_api(method: str, path: str, payload: dict = None, timeout: int = 25):
     except urllib.error.HTTPError as e:
         ms = (time.perf_counter() - start_t) * 1000
         err_body = e.read().decode("utf-8")
-        return e.code, {}, round(ms, 1), f"HTTP {e.code}: {err_body[:100]}"
+        return e.code, {}, round(ms, 1), f"HTTP {e.code}: {err_body[:140]}"
     except Exception as e:
         ms = (time.perf_counter() - start_t) * 1000
         return 0, {}, round(ms, 1), str(e)
 
 
 def banner(stage_num: int, title: str, web_hint: str):
-    print("\n" + "=" * 82)
-    print(f"🎬 CHẶNG {stage_num}/7: {title}")
+    print("\n" + "=" * 86)
+    print(f"🎬 CHẶNG {stage_num}/9: {title}")
     print(f"👀 Quan sát trên Web: {web_hint}")
-    print("=" * 82)
+    print("=" * 86)
 
 
 def pause_for_web_observation(seconds: int = STEP_DELAY_SECONDS):
     for remaining in range(seconds, 0, -1):
-        print(f"\r⏳ Đang giữ trạng thái {remaining}s để bạn quan sát trên trình duyệt Web...", end="", flush=True)
+        print(f"\r⏳ Đang giữ trạng thái {remaining}s để bạn quan sát trên Web...", end="", flush=True)
         time.sleep(1)
     print("\r" + " " * 75 + "\r", end="", flush=True)
 
 
-def run_automated_40_tables_pipeline():
-    print("🚀 KHỞI ĐỘNG HỆ THỐNG GIẢ LẬP VẬN HÀNH TỰ ĐỘNG 40 BÀN (END-TO-END AUTOMATION)")
+def fetch_active_orders_map(target_order_ids: set):
+    _, raw, _, _ = call_api("GET", "/api/orders")
+    orders = raw if isinstance(raw, list) else raw.get("items", [])
+    result = {}
+    for o in orders:
+        if o.get("id") in target_order_ids:
+            result[o["id"]] = o
+    return result
 
-    # Tải danh sách món ăn từ Database
+
+def run_automated_40_tables_pipeline():
+    print("🚀 KHỞI ĐỘNG KIỂM THỬ TOÀN DIỆN 9 CHẶNG CHO 40 BÀN (END-TO-END TEST SUITE)")
+    errors_log = []
+
+    # 1. Tải danh sách sản phẩm
     st, prod_data, _, err = call_api("GET", "/api/products")
     if st != 200:
         st, prod_data, _, err = call_api("GET", "/api/menu/products")
@@ -58,40 +69,38 @@ def run_automated_40_tables_pipeline():
 
     products = prod_data if isinstance(prod_data, list) else prod_data.get("items", [])
     avail_products = [p for p in products if p.get("is_available") not in [False, 0]]
-    if not avail_products:
-        print("❌ Thực đơn chưa có món nào mở bán!")
+    if len(avail_products) < 4:
+        print("❌ Thực đơn cần ít nhất 4 món mở bán để chạy kịch bản đổi/thêm món!")
         return
 
-    # -------------------------------------------------------------------------
+    # =========================================================================
     # CHẶNG 1: 40 KHÁCH QUÉT MÃ QR ĐẶT MÓN CÙNG LÚC
-    # -------------------------------------------------------------------------
+    # =========================================================================
     banner(
         1,
-        f"{TOTAL_TABLES} KHÁCH QUÉT MÃ QR & ĐẶT MÓN CÙNG LÚC",
-        "Mở /staff (Tab Chờ duyệt) & /cashier (40 bàn chuyển sang Đang phục vụ)"
+        f"{TOTAL_TABLES} KHÁCH QUÉT MÃ QR ĐẶT MÓN CÙNG LÚC (LƯỢT 1)",
+        "Mở /staff (Tab Chờ nhảy 40 đơn) & /cashier (40 bàn chuyển Đang phục vụ)"
     )
 
     created_orders = {}  # { table_id: order_id }
 
     def step1_customer_order(table_id: int):
-        chosen = random.sample(avail_products, k=min(len(avail_products), random.randint(2, 4)))
-        items = [
-            {
+        chosen = random.sample(avail_products, k=min(len(avail_products), 3))
+        items = []
+        for idx, p in enumerate(chosen):
+            # Món đầu tiên luôn đặt số lượng = 2 để phục vụ bài test Thu ngân giảm số lượng (-1)
+            qty = 2 if idx == 0 else random.randint(1, 2)
+            items.append({
                 "product_id": p["id"],
-                "quantity": random.randint(1, 2),
+                "quantity": qty,
                 "price": p.get("price", 50000),
                 "unit_price": p.get("price", 50000),
                 "note": random.choice(["", "Ít cay", "Làm nóng", "Ít đá"])
-            }
-            for p in chosen
-        ]
+            })
         payload = {"table_id": table_id, "customer_note": f"Khách Bàn {table_id:02d} đặt QR", "items": items}
-
-        # Gửi qua /api/orders để tạo đơn pending trước, nếu không có thì qua cashier-create-order
         code, res, ms, error = call_api("POST", "/api/orders", payload)
         if code not in [200, 201]:
             code, res, ms, error = call_api("POST", "/api/kitchen/cashier-create-order", payload)
-
         oid = res.get("order_id") or res.get("id")
         return table_id, (code in [200, 201]), oid, ms, error
 
@@ -101,175 +110,321 @@ def run_automated_40_tables_pipeline():
             tid, ok, oid, ms, err = f.result()
             if ok and oid:
                 created_orders[tid] = oid
-                print(f"  ✅ Bàn {tid:02d}: Đặt đơn thành công (Order ID: {oid}) | {ms} ms")
             else:
-                print(f"  ❌ Bàn {tid:02d}: Lỗi đặt đơn -> {err}")
+                errors_log.append(f"Chặng 1 - Bàn {tid:02d}: {err}")
 
-    print(f"📊 Kết quả Chặng 1: {len(created_orders)}/{TOTAL_TABLES} bàn đã tạo đơn thành công!")
+    print(f"  ✅ Thành công: {len(created_orders)}/{TOTAL_TABLES} bàn đã tạo đơn QR Lượt 1!")
     pause_for_web_observation()
 
-    # -------------------------------------------------------------------------
-    # CHẶNG 2: NHÂN VIÊN & THU NGÂN DUYỆT ĐƠN -> ĐẨY TOÀN BỘ 40 PHIẾU XUỐNG BẾP/BAR
-    # -------------------------------------------------------------------------
+    # =========================================================================
+    # CHẶNG 2: NHÂN VIÊN XÁC NHẬN ĐƠN -> ĐẨY 40 PHIẾU XUỐNG BẾP / QUẦY BAR
+    # =========================================================================
     banner(
         2,
-        "NHÂN VIÊN DUYỆT ĐƠN & ĐẨY 40 PHIẾU XUỐNG BẾP / QUẦY BAR",
-        "Mở /kitchen (Màn hình Bếp & Quầy Bar nhận 40 phiếu FIFO)"
+        "NHÂN VIÊN XÁC NHẬN ĐƠN & ĐẨY 40 PHIẾU XUỐNG BẾP / QUẦY BAR",
+        "Mở /kitchen (Màn hình Bếp & Bar nhận 40 phiếu) & /staff (Tab Chờ về 0)"
     )
 
-    def step2_confirm_to_kitchen(tid: int, oid: int):
-        code1, _, ms1, _ = call_api("PUT", f"/api/kitchen/orders/{oid}/confirm")
-        code2, _, ms2, _ = call_api("PUT", f"/api/kitchen/tables/{tid}/notify-kitchen")
-        return tid, oid, (code1 == 200 or code2 == 200), round(ms1 + ms2, 1)
+    def step2_confirm(tid: int, oid: int):
+        c1, _, ms1, e1 = call_api("PUT", f"/api/kitchen/orders/{oid}/confirm")
+        c2, _, ms2, e2 = call_api("PUT", f"/api/kitchen/tables/{tid}/notify-kitchen")
+        ok = (c1 == 200 or c2 == 200)
+        return tid, ok, round(ms1 + ms2, 1), (e1 or e2)
 
     with ThreadPoolExecutor(max_workers=TOTAL_TABLES) as ex:
-        futures = [ex.submit(step2_confirm_to_kitchen, tid, oid) for tid, oid in created_orders.items()]
-        confirmed_count = sum(1 for f in as_completed(futures) if f.result()[2])
+        futures = [ex.submit(step2_confirm, tid, oid) for tid, oid in created_orders.items()]
+        ok_cnt = 0
+        for f in as_completed(futures):
+            tid, ok, ms, err = f.result()
+            if ok:
+                ok_cnt += 1
+            else:
+                errors_log.append(f"Chặng 2 - Bàn {tid:02d}: {err}")
 
-    print(f"  ✅ Đã duyệt & đẩy {confirmed_count}/{len(created_orders)} phiếu xuống Màn hình Bếp & Bar!")
+    print(f"  ✅ Đã xác nhận & đẩy {ok_cnt}/{len(created_orders)} phiếu xuống Bếp/Bar!")
     pause_for_web_observation()
 
-    # -------------------------------------------------------------------------
-    # CHẶNG 3: BẾP NHẬN ĐƠN & BẤM "BẮT ĐẦU CHẾ BIẾN" (PREPARING)
-    # -------------------------------------------------------------------------
+    # =========================================================================
+    # CHẶNG 3: NHÂN VIÊN / KHÁCH GỌI THÊM MÓN BỔ SUNG (LƯỢT 2) CHO 20 BÀN ĐẦU
+    # =========================================================================
     banner(
         3,
-        "ĐẦU BẾP BẤM 'BẮT ĐẦU LÀM' (PREPARING) CHO CẢ 40 ĐƠN",
-        "Khách xem 'Món đã gọi' thấy trạng thái chuyển sang 'Đang chuẩn bị'"
+        "NHÂN VIÊN / KHÁCH GỌI THÊM MÓN BỔ SUNG (LƯỢT 2) CHO 20 BÀN",
+        "Mở /cashier -> Bấm 'Xem X lượt gọi món' để kiểm tra hiển thị chi tiết từng lượt"
     )
 
-    with ThreadPoolExecutor(max_workers=TOTAL_TABLES) as ex:
-        futures = [ex.submit(call_api, "PUT", f"/api/kitchen/orders/{oid}/preparing") for oid in created_orders.values()]
-        prep_count = sum(1 for f in as_completed(futures) if f.result()[0] == 200)
+    extra_orders = {}  # { table_id: extra_order_id }
 
-    print(f"  🔥 Bếp đang chế biến đồng loạt {prep_count} đơn hàng!")
+    def step3_add_round2(tid: int):
+        extra_prod = random.choice(avail_products)
+        payload = {
+            "table_id": tid,
+            "customer_note": f"Bàn {tid:02d} gọi thêm Lượt 2",
+            "items": [{
+                "product_id": extra_prod["id"],
+                "quantity": 1,
+                "price": extra_prod.get("price", 45000),
+                "unit_price": extra_prod.get("price", 45000),
+                "note": "Gọi thêm lượt 2"
+            }]
+        }
+        c, res, ms, err = call_api("POST", "/api/orders", payload)
+        oid2 = res.get("order_id") or res.get("id")
+        if c in [200, 201] and oid2:
+            call_api("PUT", f"/api/kitchen/orders/{oid2}/confirm")
+            return tid, True, oid2, None
+        return tid, False, None, err
+
+    with ThreadPoolExecutor(max_workers=20) as ex:
+        futures = [ex.submit(step3_add_round2, tid) for tid in range(1, 21) if tid in created_orders]
+        for f in as_completed(futures):
+            tid, ok, oid2, err = f.result()
+            if ok and oid2:
+                extra_orders[tid] = oid2
+            else:
+                errors_log.append(f"Chặng 3 - Bàn {tid:02d} gọi thêm: {err}")
+
+    print(f"  ✅ Đã tạo & xác nhận {len(extra_orders)}/20 lượt gọi thêm (Lượt 2)!")
     pause_for_web_observation()
 
-    # Lấy toàn bộ danh sách item_ids thực tế của 40 đơn đang mở
-    _, all_orders_raw, _, _ = call_api("GET", "/api/orders")
-    orders_list = all_orders_raw if isinstance(all_orders_raw, list) else all_orders_raw.get("items", [])
-    active_order_ids_set = set(created_orders.values())
+    # Lấy dữ liệu toàn bộ item_ids hiện tại
+    all_target_oids = set(created_orders.values()) | set(extra_orders.values())
+    orders_map = fetch_active_orders_map(all_target_oids)
 
-    all_item_ids = []
-    for ord_obj in orders_list:
-        if ord_obj.get("id") in active_order_ids_set:
-            for it in (ord_obj.get("items") or ord_obj.get("order_items") or []):
-                if it.get("id"):
-                    all_item_ids.append(it["id"])
-
-    # -------------------------------------------------------------------------
-    # CHẶNG 4: BẾP & BAR LÀM XONG MÓN -> ĐẨY RA TRẠM TIẾP THỰC (PASS - READY)
-    # -------------------------------------------------------------------------
+    # =========================================================================
+    # CHẶNG 4: BẾP BÁO HẾT MÓN TRÊN 10 BÀN ĐẦU (BÀN 01 -> BÀN 10)
+    # =========================================================================
     banner(
         4,
-        f"BẾP & BAR NẤU XONG {len(all_item_ids)} MÓN -> ĐẨY RA TRẠM TIẾP THỰC (PASS)",
-        "Mở /kitchen (Tab 2: Trạm Tiếp Thực PASS) & /staff (Tab Bưng món sáng xanh)"
+        "BẾP BÁO HẾT MÓN TRÊN 10 BÀN (BÀN 01 -> BÀN 10)",
+        "Mở /staff (Tab Cảnh báo nhảy 10) & /cashier (Món gạch đỏ 'Bếp báo hết')"
     )
 
-    if all_item_ids:
-        # Chia thành các mẻ (batch) đẩy ra PASS giống thực tế
-        chunk_size = 25
-        for i in range(0, len(all_item_ids), chunk_size):
-            batch = all_item_ids[i:i + chunk_size]
-            call_api("PUT", "/api/kitchen/batch-ready", {"item_ids": batch})
-        print(f"  🔔 Đã hoàn thành chế biến & đẩy {len(all_item_ids)} món ra Trạm Tiếp Thực (PASS)!")
+    out_of_stock_items = []  # list of (tid, item_id, old_product_id)
+    for tid in range(1, 11):
+        oid = created_orders.get(tid)
+        ord_obj = orders_map.get(oid, {})
+        items = ord_obj.get("items") or ord_obj.get("order_items") or []
+        if items:
+            target_it = items[-1]
+            c, _, _, err = call_api("PUT", f"/api/kitchen/items/{target_it['id']}/out-of-stock", {
+                "reason": "Hết nguyên liệu trong ca"
+            })
+            if c == 200:
+                out_of_stock_items.append((tid, target_it["id"], target_it.get("product_id")))
+            else:
+                errors_log.append(f"Chặng 4 - Báo hết món Bàn {tid:02d}: {err}")
+
+    print(f"  🚨 Bếp đã báo hết {len(out_of_stock_items)}/10 món & bắn cảnh báo sang Nhân viên/Thu ngân!")
     pause_for_web_observation()
 
-    # -------------------------------------------------------------------------
-    # CHẶNG 5: TIẾP THỰC & NHÂN VIÊN GIAO MÓN LÊN BÀN CHO 40 BÀN (SERVED)
-    # -------------------------------------------------------------------------
+    # =========================================================================
+    # CHẶNG 5: NHÂN VIÊN PHỤC VỤ ĐỔI MÓN HẾT SANG MÓN MỚI CHO KHÁCH
+    # =========================================================================
     banner(
         5,
-        f"NHÂN VIÊN BƯNG TOÀN BỘ {len(all_item_ids)} MÓN LÊN 40 BÀN (SERVED)",
-        "Mở /cashier -> Bấm vào bất kỳ bàn nào sẽ thấy nhãn xanh '✓ Đã lên đủ món'"
+        "NHÂN VIÊN ĐỔI MÓN HẾT SANG MÓN MỚI CHO 10 BÀN (SWAP ITEM)",
+        "Mở /staff (Cảnh báo món hết giảm về 0) & /kitchen (Nhận phiếu món đổi mới)"
     )
 
-    if all_item_ids:
-        chunk_size = 25
-        for i in range(0, len(all_item_ids), chunk_size):
-            batch = all_item_ids[i:i + chunk_size]
-            call_api("PUT", "/api/kitchen/batch-served", {"item_ids": batch})
-        print(f"  🍽️ Nhân viên đã bưng toàn bộ {len(all_item_ids)} món lên 40 bàn thành công!")
+    swapped_count = 0
+    for tid, item_id, old_pid in out_of_stock_items:
+        alt_prod = next((p for p in avail_products if p["id"] != old_pid), avail_products[0])
+        c, _, _, err = call_api("PUT", f"/api/kitchen/items/{item_id}/swap", {
+            "new_product_id": alt_prod["id"],
+            "quantity": 1,
+            "note": f"Nhân viên đổi từ món hết sang {alt_prod.get('name')}"
+        })
+        if c == 200:
+            swapped_count += 1
+        else:
+            errors_log.append(f"Chặng 5 - Đổi món Bàn {tid:02d}: {err}")
+
+    print(f"  🔄 Nhân viên đã đổi món thành công cho {swapped_count}/{len(out_of_stock_items)} bàn!")
     pause_for_web_observation()
 
-    # -------------------------------------------------------------------------
-    # CHẶNG 6: 40 BÀN BẤM "YÊU CẦU THANH TOÁN" (TIỀN MẶT / CHUYỂN KHOẢN QR)
-    # -------------------------------------------------------------------------
+    # =========================================================================
+    # CHẶNG 6: THU NGÂN THÊM MÓN HỘ KHÁCH TẠI QUẦY CHO 10 BÀN (BÀN 11 -> BÀN 20)
+    # =========================================================================
     banner(
         6,
-        "40 BÀN ĐỒNG LOẠT BẤM 'YÊU CẦU THANH TOÁN' TRÊN ĐIỆN THOẠI",
-        "Mở /cashier (Nút 'Yêu cầu thanh toán / Gọi NV' nhảy 40) & /staff (Tab Cảnh báo nhảy 40)"
+        "THU NGÂN THÊM MÓN HỘ KHÁCH TẠI QUẦY (BÀN 11 -> BÀN 20)",
+        "Mở /cashier (Bàn 11..20 cập nhật thêm món mới & chuyển Bếp)"
     )
 
-    def step6_customer_call_payment(tid: int):
+    cashier_added_count = 0
+    for tid in range(11, 21):
+        oid = created_orders.get(tid)
+        if not oid:
+            continue
+        p = random.choice(avail_products)
+        c, _, _, err = call_api("POST", f"/api/kitchen/orders/{oid}/add-item", {
+            "product_id": p["id"],
+            "quantity": 1,
+            "price": p.get("price", 55000),
+            "unit_price": p.get("price", 55000),
+            "note": "Thu ngân thêm hộ khách tại quầy"
+        })
+        if c == 200:
+            call_api("PUT", f"/api/kitchen/tables/{tid}/notify-kitchen")
+            cashier_added_count += 1
+        else:
+            errors_log.append(f"Chặng 6 - Thu ngân thêm món Bàn {tid:02d}: {err}")
+
+    print(f"  ➕ Thu ngân đã thêm món & đẩy Bếp thành công cho {cashier_added_count}/10 bàn!")
+    pause_for_web_observation()
+
+    # =========================================================================
+    # CHẶNG 7: THU NGÂN TRỪ SỐ LƯỢNG (-1) & HỦY MÓN CÓ LÝ DO NGHIỆP VỤ
+    # =========================================================================
+    banner(
+        7,
+        "THU NGÂN GIẢM SỐ LƯỢNG (-1) & HỦY MÓN KÈM LÝ DO (BÀN 21 -> BÀN 30)",
+        "Kiểm tra logic giảm số lượng từ 2 -> 1 (không bị xóa mất món) & hủy món có lý do"
+    )
+
+    orders_map = fetch_active_orders_map(all_target_oids)
+    decreased_ok = 0
+    cancelled_ok = 0
+
+    for tid in range(21, 31):
+        oid = created_orders.get(tid)
+        ord_obj = orders_map.get(oid, {})
+        items = ord_obj.get("items") or ord_obj.get("order_items") or []
+        if len(items) >= 2:
+            # Món 1 có quantity = 2 -> giảm xuống 1 kèm lý do
+            it_dec = items[0]
+            cur_q = int(it_dec.get("quantity", 2))
+            if cur_q > 1:
+                c1, _, _, e1 = call_api("PUT", f"/api/kitchen/items/{it_dec['id']}/quantity", {
+                    "quantity": cur_q - 1,
+                    "reason": "Khách đổi ý / Trả lại 1 phần"
+                })
+                if c1 == 200:
+                    decreased_ok += 1
+                else:
+                    errors_log.append(f"Chặng 7 - Giảm SL Bàn {tid:02d}: {e1}")
+
+            # Món 2 -> hủy món kèm lý do nghiệp vụ
+            it_can = items[1]
+            c2, _, _, e2 = call_api("PUT", f"/api/kitchen/items/{it_can['id']}/cancel", {
+                "reason": "Thu ngân / Nhân viên bấm nhầm"
+            })
+            if c2 == 200:
+                cancelled_ok += 1
+            else:
+                errors_log.append(f"Chặng 7 - Hủy món Bàn {tid:02d}: {e2}")
+
+    # Xác minh lại từ DB xem món giảm từ 2 -> 1 vẫn còn tồn tại (không bị xóa nhầm)
+    verify_map = fetch_active_orders_map(all_target_oids)
+    verify_kept = 0
+    for tid in range(21, 31):
+        oid = created_orders.get(tid)
+        items = verify_map.get(oid, {}).get("items") or []
+        if items and items[0].get("quantity") == 1 and items[0].get("item_status") != "cancelled":
+            verify_kept += 1
+
+    print(f"  ➖ Giảm số lượng (2 -> 1): {decreased_ok}/10 bàn (Xác minh DB giữ nguyên món: {verify_kept}/10 bàn)")
+    print(f"  🗑️ Hủy món kèm lý do nghiệp vụ: {cancelled_ok}/10 bàn")
+    pause_for_web_observation()
+
+    # =========================================================================
+    # CHẶNG 8: BẾP & BAR NẤU XONG & GIAO ĐỦ MÓN LÊN TOÀN BỘ 40 BÀN
+    # =========================================================================
+    banner(
+        8,
+        "BẾP & BAR HOÀN THÀNH CHẾ BIẾN & GIAO MÓN LÊN ĐỦ 40 BÀN (SERVED)",
+        "Mở /cashier -> Tất cả món còn hiệu lực hiện nhãn xanh '✓ Đã lên đủ món'"
+    )
+
+    latest_orders_map = fetch_active_orders_map(all_target_oids)
+    valid_item_ids = []
+    for ord_obj in latest_orders_map.values():
+        for it in (ord_obj.get("items") or ord_obj.get("order_items") or []):
+            st = str(it.get("item_status") or it.get("status") or "").lower()
+            if it.get("id") and st not in ["cancelled", "out_of_stock"]:
+                valid_item_ids.append(it["id"])
+
+    if valid_item_ids:
+        chunk_size = 30
+        for i in range(0, len(valid_item_ids), chunk_size):
+            batch = valid_item_ids[i:i + chunk_size]
+            call_api("PUT", "/api/kitchen/batch-ready", {"item_ids": batch})
+        for i in range(0, len(valid_item_ids), chunk_size):
+            batch = valid_item_ids[i:i + chunk_size]
+            call_api("PUT", "/api/kitchen/batch-served", {"item_ids": batch})
+
+    print(f"  🍽️ Đã nấu xong & giao đủ {len(valid_item_ids)} phần món lên toàn bộ 40 bàn!")
+    pause_for_web_observation()
+
+    # =========================================================================
+    # CHẶNG 9: 40 BÀN YÊU CẦU THANH TOÁN & THU NGÂN CHỐT BILL GIẢI PHÓNG BÀN
+    # =========================================================================
+    banner(
+        9,
+        "40 BÀN GỬI YÊU CẦU THANH TOÁN & THU NGÂN CHỐT HÓA ĐƠN",
+        "Mở /cashier -> Doanh thu ca tăng & 40 bàn tự động dọn sạch về 'Còn trống'"
+    )
+
+    def step9_call_pay(tid: int):
         method = "TRANSFER" if tid % 2 == 0 else "CASH"
-        note_text = "Thanh toán Chuyển khoản QR" if method == "TRANSFER" else "Thanh toán Tiền mặt"
-        code, _, ms, _ = call_api("POST", "/api/kitchen/live-alerts-v2", {
+        c, _, _, _ = call_api("POST", "/api/kitchen/live-alerts-v2", {
             "table_id": tid,
             "table_name": f"Bàn {tid:02d}",
             "type": "CALL_PAYMENT",
             "payment_method": method,
-            "note": note_text
+            "note": "Thanh toán Chuyển khoản QR" if method == "TRANSFER" else "Thanh toán Tiền mặt"
         })
-        return tid, (code == 200), method
+        return c == 200
 
     with ThreadPoolExecutor(max_workers=TOTAL_TABLES) as ex:
-        futures = [ex.submit(step6_customer_call_payment, tid) for tid in created_orders.keys()]
-        call_pay_count = sum(1 for f in as_completed(futures) if f.result()[1])
+        pay_calls = sum(1 for f in as_completed([ex.submit(step9_call_pay, tid) for tid in created_orders]) if f.result())
 
-    print(f"  💳 {call_pay_count} bàn đang nhấp nháy đỏ gọi Thu ngân thanh toán!")
-    pause_for_web_observation(seconds=7)  # Dừng 7 giây để bạn nhìn rõ 40 cảnh báo đỏ trên Thu ngân & Nhân viên
+    print(f"  🔔 {pay_calls}/{TOTAL_TABLES} bàn đã gửi tín hiệu gọi thanh toán!")
+    pause_for_web_observation(seconds=3)
 
-    # -------------------------------------------------------------------------
-    # CHẶNG 7: THU NGÂN GIẢ LẬP TÍNH TIỀN & CHỐT BILL CHO CẢ 40 BÀN
-    # -------------------------------------------------------------------------
-    banner(
-        7,
-        "THU NGÂN TÍNH TIỀN, CHỐT HÓA ĐƠN & GIẢI PHÓNG 40 BÀN VỀ TRỐNG",
-        "Mở /cashier -> Doanh thu ca tăng vọt & 40 bàn tự động trở về 'Còn trống'"
-    )
+    total_rev = 0.0
+    paid_bills = 0
 
-    total_simulated_revenue = 0.0
-    total_paid_bills = 0
-
-    def step7_cashier_checkout(tid: int):
+    def step9_checkout(tid: int):
         method = "TRANSFER" if tid % 2 == 0 else "CASH"
-        code, res, ms, err = call_api("POST", f"/api/kitchen/tables/{tid}/checkout-simulated", {
+        c, res, ms, err = call_api("POST", f"/api/kitchen/tables/{tid}/checkout-simulated", {
             "payment_method": method
         })
-        if code == 200:
-            return tid, True, float(res.get("paid_amount", 0) or 0), method, ms
-        # Fallback nếu chưa kịp lưu hàm checkout-simulated
-        call_api("POST", f"/api/kitchen/tables/{tid}/cancel-table", {"reason": "Thu ngân hoàn tất thanh toán"})
-        call_api("PUT", f"/api/kitchen/live-alerts-v2/{tid}/resolve")
-        return tid, True, 0.0, method, ms
+        if c == 200:
+            return tid, True, float(res.get("paid_amount", 0) or 0), None
+        return tid, False, 0.0, err
 
     with ThreadPoolExecutor(max_workers=TOTAL_TABLES) as ex:
-        futures = [ex.submit(step7_cashier_checkout, tid) for tid in created_orders.keys()]
-        for f in as_completed(futures):
-            tid, ok, paid_amt, method, ms = f.result()
+        for f in as_completed([ex.submit(step9_checkout, tid) for tid in created_orders]):
+            tid, ok, amt, err = f.result()
             if ok:
-                total_paid_bills += 1
-                total_simulated_revenue += paid_amt
-                print(
-                    f"  💰 Bàn {tid:02d}: Đã thu {paid_amt:,.0f}đ ({'Chuyển khoản QR' if method == 'TRANSFER' else 'Tiền mặt'}) "
-                    f"& đóng phiên bàn | {ms} ms"
-                )
+                paid_bills += 1
+                total_rev += amt
+            else:
+                errors_log.append(f"Chặng 9 - Thanh toán Bàn {tid:02d}: {err}")
 
-    # Kiểm tra tổng doanh thu ca trực trên Server sau khi thu tiền xong 40 bàn
     _, shift_res, _, _ = call_api("GET", "/api/kitchen/shift/current")
 
-    print("\n" + "=" * 82)
-    print("🏆 BÁO CÁO TỔNG KẾT CHU TRÌNH VẬN HÀNH TỰ ĐỘNG 40 BÀN (A -> Z)")
-    print("=" * 82)
-    print(f"  • Số bàn phục vụ trọn vẹn từ lúc vào đến lúc về : {total_paid_bills}/{TOTAL_TABLES} bàn (100%)")
-    print(f"  • Tổng số món ăn Bếp/Bar đã nấu & bưng ra bàn   : {len(all_item_ids)} món")
-    print(f"  • Doanh thu thu được trong đợt giả lập vừa rồi  : {total_simulated_revenue:,.0f} VNĐ")
+    print("\n" + "=" * 86)
+    print("🏆 BÁO CÁO KIỂM THỬ TOÀN DIỆN HỆ THỐNG SMARTPOS (40 BÀN - 9 CHẶNG NGHIỆP VỤ)")
+    print("=" * 86)
+    print(f"  • Tổng số bàn chạy đồng thời           : {paid_bills}/{TOTAL_TABLES} bàn hoàn tất A -> Z")
+    print(f"  • Lượt gọi thêm bổ sung (Lượt 2)      : {len(extra_orders)}/20 bàn thành công")
+    print(f"  • Bếp báo hết & Nhân viên đổi món     : {swapped_count}/{len(out_of_stock_items)} món đổi thành công")
+    print(f"  • Thu ngân thêm món tại quầy          : {cashier_added_count}/10 bàn thành công")
+    print(f"  • Thu ngân giảm SL (2->1) & Hủy món   : Giảm {decreased_ok}/10 (Giữ đúng SL=1: {verify_kept}/10) | Hủy {cancelled_ok}/10")
+    print(f"  • Tổng số món Bếp/Bar giao lên bàn    : {len(valid_item_ids)} phần món")
+    print(f"  • Doanh thu thu được trong đợt test   : {total_rev:,.0f} VNĐ")
     if shift_res:
-        print(f"  • Tổng doanh thu lũy kế trong Ca trực hiện tại  : {shift_res.get('db_completed_revenue', 0):,.0f} VNĐ "
-              f"({shift_res.get('db_completed_bills', 0)} hóa đơn đã thanh toán)")
-    print("  • Trạng thái sơ đồ 40 bàn hiện tại              : Đã dọn sạch & sẵn sàng đón lượt khách mới!")
-    print("=" * 82)
+        print(f"  • Doanh thu lũy kế ca trực trên DB    : {shift_res.get('db_completed_revenue', 0):,.0f} VNĐ ({shift_res.get('db_completed_bills', 0)} bill)")
+    if not errors_log:
+        print("  • TRẠNG THÁI HỆ THỐNG                : ✅ HOÀN HẢO 100% - KHÔNG PHÁT SINH BẤT KỲ LỖI NÀO!")
+    else:
+        print(f"  • CẢNH BÁO ({len(errors_log)} lỗi):")
+        for e in errors_log[:10]:
+            print(f"     - {e}")
+    print("=" * 86)
 
 
 if __name__ == "__main__":

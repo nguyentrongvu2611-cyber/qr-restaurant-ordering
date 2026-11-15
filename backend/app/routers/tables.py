@@ -16,7 +16,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 QR_DIR = os.path.join(BASE_DIR, "static", "qrcodes")
 os.makedirs(QR_DIR, exist_ok=True)
 
-FRONTEND_ORDER_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+FRONTEND_ORDER_URL = os.getenv("FRONTEND_URL", "http://192.168.100.26")
 
 
 def generate_qr_image(table_number: str, token: str) -> str:

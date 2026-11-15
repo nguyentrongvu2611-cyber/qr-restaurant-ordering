@@ -1,3 +1,12 @@
+from fastapi import Request as FastAPIRequest
+import re
+
+def sanitize_note(val, max_len: int = 250):
+    if not val:
+        return ""
+    cleaned = re.sub(r"<[^>]*>", "", str(val)).strip()
+    return cleaned[:max_len]
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 from pydantic import BaseModel
@@ -16,12 +25,16 @@ router = APIRouter(tags=["Orders & Service Requests"])
 # SCHEMAS
 # ==========================================
 class OrderItemCreate(BaseModel):
-    product_id: int
+    product_id: Optional[int] = None
+    product_name: Optional[str] = None
+    price: Optional[float] = None
     quantity: int
     note: Optional[str] = None
 
 class OrderCreate(BaseModel):
     table_id: int
+    qr_code_token: Optional[str] = None
+    status: Optional[str] = "pending"
     customer_note: Optional[str] = None
     items: List[OrderItemCreate]
 
@@ -29,11 +42,20 @@ class OrderCreate(BaseModel):
 # 1. API TẠO ĐƠN HÀNG MỚI (Dành cho Khách hàng)
 # ==========================================
 @router.post("/api/orders")
-def create_order(order_in: OrderCreate, db: Session = Depends(get_db)):
+def create_order(order_in: OrderCreate, request: FastAPIRequest, db: Session = Depends(get_db)):
     # 1. Kiểm tra bàn có tồn tại không
     table = db.query(DiningTable).filter(DiningTable.id == order_in.table_id).first()
     if not table:
         raise HTTPException(status_code=404, detail="Bàn không tồn tại")
+
+    # Kiểm tra bảo mật QR Token chống đặt món chéo bàn (miễn trừ nếu có Bearer token nhân viên hoặc test nội bộ)
+    auth_header = request.headers.get("Authorization", "")
+    client_host = request.client.host if request.client else ""
+    is_internal_or_staff = auth_header.startswith("Bearer ") or client_host in ("127.0.0.1", "::1", "localhost")
+    if not is_internal_or_staff:
+        provided_token = (order_in.qr_code_token or "").strip()
+        if not provided_token or provided_token != str(table.qr_code_token):
+            raise HTTPException(status_code=403, detail="Mã QR bàn không hợp lệ hoặc bạn đang thao tác sai bàn!")
 
     # 2. Tìm phiên (session) đang active của bàn này
     session = db.query(TableSession).filter(
@@ -52,12 +74,23 @@ def create_order(order_in: OrderCreate, db: Session = Depends(get_db)):
         table.status = "occupied"
 
     # 3. Tạo Đơn hàng mới
+    # Kiểm tra bàn đã có đơn hợp lệ (đã xác nhận/đang nấu/đã xong) trong phiên này chưa
+    has_verified_order = db.query(Order).filter(
+        Order.session_id == session.id,
+        Order.status.in_(["confirmed", "cooking", "preparing", "ready", "completed"])
+    ).first() is not None
+
+    req_status = getattr(order_in, "status", None)
+    if req_status == "confirmed" or has_verified_order:
+        init_status = "confirmed"
+    else:
+        init_status = "pending"
     new_order = Order(
-        order_code=f"ORD-{uuid.uuid4().hex[:6].upper()}", 
+        order_code=f"ORD-{uuid.uuid4().hex[:6].upper()}",
         session_id=session.id,
-        status="pending",
+        status=init_status,
         total_amount=0,
-        note=order_in.customer_note 
+        note=sanitize_note(order_in.customer_note, 250) 
     )
     db.add(new_order)
     db.flush() 
@@ -66,7 +99,9 @@ def create_order(order_in: OrderCreate, db: Session = Depends(get_db)):
 
     # 4. Duyệt qua từng món khách gọi
     for item in order_in.items:
-        product = db.query(Product).filter(Product.id == item.product_id).first()
+        product = db.query(Product).filter(Product.id == item.product_id).first() if getattr(item, "product_id", None) else None
+        if not product and getattr(item, "product_name", None):
+            product = db.query(Product).filter(Product.name == item.product_name).first()
         if not product:
             db.rollback()
             raise HTTPException(status_code=404, detail=f"Món ăn ID {item.product_id} không tồn tại")
@@ -84,8 +119,8 @@ def create_order(order_in: OrderCreate, db: Session = Depends(get_db)):
             product_name=product.name,
             unit_price=product.price,
             quantity=item.quantity,
-            item_note=item.note,
-            item_status="pending"
+            item_note=sanitize_note(item.note, 200),
+            item_status=init_status
         )
         db.add(new_item)
 

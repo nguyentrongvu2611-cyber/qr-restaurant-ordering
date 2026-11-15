@@ -4,7 +4,7 @@ import {
   Upload, Save, RefreshCw, AlertTriangle
 } from 'lucide-react';
 
-const API_BASE = 'http://127.0.0.1:8000';
+const API_BASE = 'http://192.168.100.26';
 
 const POPULAR_BANKS = [
   { id: 'MB', name: 'MB Bank (Quân Đội)' },

@@ -1,3 +1,4 @@
+from app.core.security import require_admin
 from datetime import datetime, timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, Query
@@ -9,8 +10,8 @@ from app.models.table import DiningTable, TableSession
 from app.models.category import Category
 from app.models.menu_item import Product
 from app.models.order import Order, OrderItem, OrderStatusHistory, Payment
-router = APIRouter(prefix="/api/admin", tags=["Admin Dashboard"])
-from app.core.security import get_password_hash
+router = APIRouter(dependencies=[Depends(require_admin)], prefix="/api/admin", tags=["Admin Dashboard"])
+from app.core.security import require_admin,  get_password_hash
 from fastapi import HTTPException
 from pydantic import BaseModel
 

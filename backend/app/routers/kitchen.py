@@ -1,3 +1,4 @@
+from app.models.table import DiningTable, TableSession
 import json
 import os
 import uuid
@@ -438,10 +439,9 @@ def cashier_create_merged_order(payload: dict = Body(...), db: Session = Depends
         raise HTTPException(status_code=400, detail="Thiếu thông tin bàn hoặc danh sách món trống")
 
     try:
-        try:
-            db.execute(text("UPDATE tables SET status = 'occupied' WHERE id = :tid"), {"tid": table_id})
-        except Exception:
-            pass
+        table = db.query(DiningTable).filter(DiningTable.id == table_id).first()
+        if table:
+            table.status = "occupied"
 
         active_session = (
             db.query(TableSession)
@@ -449,52 +449,53 @@ def cashier_create_merged_order(payload: dict = Body(...), db: Session = Depends
             .first()
         )
         if not active_session:
-            active_session = TableSession(table_id=table_id, status="active")
-            if hasattr(active_session, "session_code"):
-                active_session.session_code = f"SES-{uuid.uuid4().hex[:4].upper()}"
-            if hasattr(active_session, "created_at"):
-                active_session.created_at = datetime.now()
+            active_session = TableSession(
+                table_id=table_id,
+                session_token=uuid.uuid4().hex,
+                status="active",
+                started_at=datetime.now()
+            )
             db.add(active_session)
             db.flush()
 
-        batch_total = sum(
-            float(it.get("price", 0) or it.get("unit_price", 0)) * int(it.get("quantity", 1))
-            for it in items_data
+        new_order = Order(
+            order_code=f"ORD-{uuid.uuid4().hex[:6].upper()}",
+            session_id=active_session.id,
+            status="confirmed",
+            total_amount=0,
+            created_at=datetime.now()
         )
-
-        new_order = Order(table_id=table_id, status="confirmed")
-        if hasattr(new_order, "session_id") and active_session:
-            new_order.session_id = active_session.id
-        if hasattr(new_order, "order_code"):
-            new_order.order_code = f"ORD-{uuid.uuid4().hex[:6].upper()}"
-        if hasattr(new_order, "total_amount"):
-            new_order.total_amount = batch_total
-        if hasattr(new_order, "created_at"):
-            new_order.created_at = datetime.now()
-
         db.add(new_order)
         db.flush()
 
+        batch_total = 0
         for it in items_data:
             prod_id = it.get("product_id")
-            qty = int(it.get("quantity", 1))
-            price = float(it.get("price", 0) or it.get("unit_price", 0))
+            prod_name = it.get("product_name") or it.get("name")
+            qty = int(it.get("quantity", 1) or 1)
             note = it.get("note", "")
 
-            order_item = OrderItem(order_id=new_order.id, product_id=prod_id, quantity=qty)
-            if hasattr(order_item, "unit_price"):
-                order_item.unit_price = price
-            if hasattr(order_item, "price"):
-                order_item.price = price
-            if hasattr(order_item, "note"):
-                order_item.note = note
-            if hasattr(order_item, "item_status"):
-                order_item.item_status = "confirmed"
-            if hasattr(order_item, "status"):
-                order_item.status = "confirmed"
+            product = db.query(Product).filter(Product.id == prod_id).first() if prod_id else None
+            if not product and prod_name:
+                product = db.query(Product).filter(Product.name == prod_name).first()
+            if not product:
+                raise HTTPException(status_code=404, detail=f"Không tìm thấy món ăn {prod_id or prod_name}")
 
+            price = float(getattr(product, "price", 0) or 0)
+            batch_total += price * qty
+
+            order_item = OrderItem(
+                order_id=new_order.id,
+                product_id=product.id,
+                product_name=product.name,
+                unit_price=price,
+                quantity=qty,
+                item_note=note,
+                item_status="confirmed"
+            )
             db.add(order_item)
 
+        new_order.total_amount = batch_total
         db.commit()
         db.refresh(new_order)
 
@@ -502,9 +503,12 @@ def cashier_create_merged_order(payload: dict = Body(...), db: Session = Depends
             "status": "success",
             "id": new_order.id,
             "order_id": new_order.id,
-            "order_code": getattr(new_order, "order_code", f"ORD-{new_order.id}"),
+            "order_code": new_order.order_code,
             "created_at": datetime.now().isoformat()
         }
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Lỗi tạo phiếu gửi bếp: {str(e)}")
@@ -512,61 +516,76 @@ def cashier_create_merged_order(payload: dict = Body(...), db: Session = Depends
 
 @router.post("/orders/{order_id}/add-item")
 def staff_add_item_to_existing_order(order_id: int, payload: dict = Body(...), db: Session = Depends(get_db)):
-    """Nhân viên thêm món mới vào đơn hiện tại của khách"""
+    """Nhân viên thêm món: nếu đơn đang chờ duyệt thì gộp vào đơn đó; nếu đơn đã gửi Bếp thì tạo phiếu bổ sung gửi thẳng xuống Bếp"""
     order = db.query(Order).filter(Order.id == order_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="Không tìm thấy đơn hàng")
 
     prod_id = payload.get("product_id")
     qty = int(payload.get("quantity", 1) or 1)
-    note = payload.get("note", "")
+    note = str(payload.get("note", "") or "")[:200]
 
     product = db.query(Product).filter(Product.id == prod_id).first()
     if not product:
         raise HTTPException(status_code=404, detail="Không tìm thấy món ăn")
 
     price = float(getattr(product, "price", 0) or 0)
+    order_st = str(getattr(order, "status", "pending")).lower()
+    if order_st in ["completed", "paid", "cancelled"]:
+        raise HTTPException(status_code=400, detail="Đơn hàng đã thanh toán hoặc đã hủy, không thể thêm món!")
 
-    existing_item = (
-        db.query(OrderItem)
-        .filter(OrderItem.order_id == order_id, OrderItem.product_id == prod_id)
-        .first()
+    if getattr(order, "session_id", None):
+        sess = db.query(TableSession).filter(TableSession.id == order.session_id).first()
+        if sess and str(getattr(sess, "status", "")).lower() != "active":
+            raise HTTPException(status_code=400, detail="Phiên bàn đã đóng, không thể thao tác trên đơn cũ!")
+
+    # Nếu đơn đang ở trạng thái chờ duyệt ('pending') -> thêm trực tiếp vào đơn đang chờ duyệt
+    if order_st == "pending":
+        existing_item = (
+            db.query(OrderItem)
+            .filter(OrderItem.order_id == order_id, OrderItem.product_id == prod_id, OrderItem.item_status == "pending")
+            .first()
+        )
+        if existing_item:
+            existing_item.quantity = int(existing_item.quantity or 1) + qty
+        else:
+            new_item = OrderItem(
+                order_id=order_id,
+                product_id=product.id,
+                product_name=product.name,
+                unit_price=price,
+                quantity=qty,
+                item_note=note,
+                item_status="pending"
+            )
+            db.add(new_item)
+        order.total_amount = float(order.total_amount or 0) + (price * qty)
+        db.commit()
+        return {"status": "success", "order_id": order.id}
+
+    # Nếu đơn đã chuyển Bếp -> tạo phiếu bổ sung (L2, L3...) với status='confirmed' gửi thẳng xuống Bếp
+    addon_order = Order(
+        order_code=f"ORD-{uuid.uuid4().hex[:6].upper()}",
+        session_id=order.session_id,
+        status="confirmed",
+        total_amount=price * qty,
+        created_at=datetime.now()
     )
-    if existing_item and str(getattr(existing_item, "item_status", "pending")).lower() in ["pending", "confirmed"]:
-        existing_item.quantity = int(existing_item.quantity or 1) + qty
-    else:
-        order_st = str(getattr(order, "status", "pending")).lower()
-        item_st = "confirmed" if order_st in ["confirmed", "cooking", "preparing"] else "pending"
-
-        new_item = OrderItem(order_id=order_id, product_id=prod_id, quantity=qty)
-        if hasattr(new_item, "unit_price"):
-            new_item.unit_price = price
-        if hasattr(new_item, "price"):
-            new_item.price = price
-        if hasattr(new_item, "note"):
-            new_item.note = note
-        if hasattr(new_item, "item_status"):
-            new_item.item_status = item_st
-        if hasattr(new_item, "status"):
-            new_item.status = item_st
-        db.add(new_item)
-
+    db.add(addon_order)
     db.flush()
 
-    all_items = db.query(OrderItem).filter(OrderItem.order_id == order_id).all()
-    new_total = 0.0
-    for it in all_items:
-        st = str(getattr(it, "item_status", getattr(it, "status", ""))).lower()
-        if st not in ["cancelled", "out_of_stock"]:
-            u_price = float(getattr(it, "unit_price", getattr(it, "price", 0)) or 0)
-            new_total += u_price * int(it.quantity or 1)
-
-    if hasattr(order, "total_amount"):
-        order.total_amount = new_total
-
+    addon_item = OrderItem(
+        order_id=addon_order.id,
+        product_id=product.id,
+        product_name=product.name,
+        unit_price=price,
+        quantity=qty,
+        item_note=note,
+        item_status="confirmed"
+    )
+    db.add(addon_item)
     db.commit()
-    return {"status": "success", "order_id": order_id, "new_total": new_total}
-
+    return {"status": "success", "order_id": addon_order.id, "order_code": addon_order.order_code}
 
 @router.put("/items/{item_id}/swap")
 def staff_swap_out_of_stock_item(item_id: int, payload: dict = Body(...), db: Session = Depends(get_db)):
@@ -584,20 +603,30 @@ def staff_swap_out_of_stock_item(item_id: int, payload: dict = Body(...), db: Se
     qty = int(getattr(item, "quantity", 1) or 1)
     new_price = float(new_product.price or 0)
 
-    if hasattr(item, "product_id"):
-        item.product_id = new_product.id
-    if hasattr(item, "menu_item_id"):
-        item.menu_item_id = new_product.id
-    if hasattr(item, "product_name"):
-        item.product_name = new_product.name
-    if hasattr(item, "unit_price"):
-        item.unit_price = new_price
-    if hasattr(item, "price"):
-        item.price = new_price
+    # Hủy dòng món cũ bị hết và tạo dòng OrderItem mới tinh với ID mới để KDS Bếp/Bar hiển thị ngay
     if hasattr(item, "item_status"):
-        item.item_status = "confirmed"
+        item.item_status = "cancelled"
     if hasattr(item, "status"):
-        item.status = "confirmed"
+        item.status = "cancelled"
+    if hasattr(item, "cancel_reason"):
+        item.cancel_reason = f"Đã đổi sang {new_product.name}"
+
+    new_item = OrderItem(order_id=item.order_id, product_id=new_product.id, quantity=qty)
+    if hasattr(new_item, "product_name"):
+        new_item.product_name = new_product.name
+    if hasattr(new_item, "unit_price"):
+        new_item.unit_price = new_price
+    if hasattr(new_item, "price"):
+        new_item.price = new_price
+    if hasattr(new_item, "item_note"):
+        new_item.item_note = getattr(item, "item_note", "")
+    if hasattr(new_item, "note"):
+        new_item.note = getattr(item, "note", "")
+    if hasattr(new_item, "item_status"):
+        new_item.item_status = "confirmed"
+    if hasattr(new_item, "status"):
+        new_item.status = "confirmed"
+    db.add(new_item)
 
     order = db.query(Order).filter(Order.id == item.order_id).first()
     if order and hasattr(order, "total_amount"):

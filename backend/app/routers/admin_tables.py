@@ -23,7 +23,7 @@ def create_table(data: TableCreate, db: Session = Depends(get_db)):
     
     token = f"TBL-{uuid.uuid4().hex[:10].upper()}"
     # Sinh link QR gọi món trỏ về Frontend (cổng 5173)
-    qr_order_url = f"http://localhost:5173/order?token={token}"
+    qr_order_url = f"http://192.168.100.26/order?token={token}"
     qr_img_api = f"https://api.qrserver.com/v1/create-qr-code/?size=250x250&data={qr_order_url}"
 
     new_table = DiningTable(
@@ -55,7 +55,7 @@ def regenerate_qr(table_id: int, db: Session = Depends(get_db)):
     if not table:
         raise HTTPException(status_code=404, detail="Không tìm thấy bàn")
     token = f"TBL-{uuid.uuid4().hex[:10].upper()}"
-    qr_order_url = f"http://localhost:5173/order?token={token}"
+    qr_order_url = f"http://192.168.100.26/order?token={token}"
     table.qr_code_token = token
     table.qr_image_url = f"https://api.qrserver.com/v1/create-qr-code/?size=250x250&data={qr_order_url}"
     db.commit()

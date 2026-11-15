@@ -4,7 +4,7 @@ import {
   Lock, Unlock, CheckCircle2, XCircle, Eye, EyeOff, Phone, AlertTriangle
 } from 'lucide-react';
 
-const API_BASE = 'http://127.0.0.1:8000';
+const API_BASE = 'http://192.168.100.26';
 
 const ROLE_CONFIG = {
   admin: {

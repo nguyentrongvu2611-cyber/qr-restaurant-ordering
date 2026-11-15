@@ -14,7 +14,7 @@ import {
   PieChart, Pie, Cell
 } from 'recharts';
 
-const API_BASE = 'http://127.0.0.1:8000';
+const API_BASE = 'http://192.168.100.26';
 
 const BANK_CONFIGS = {
   VCB: {
@@ -101,6 +101,8 @@ export default function CashierDashboard() {
   });
 
   const [showCancelTableModal, setShowCancelTableModal] = useState(false);
+  const [showOrderBatchesModal, setShowOrderBatchesModal] = useState(false);
+  const [voidItemModal, setVoidItemModal] = useState(null); // { item, mode: 'DECREASE' | 'CANCEL_ALL', reason: string }
   const [cancelTableReason, setCancelTableReason] = useState('Khách đổi ý không dùng bữa');
 
   const [dismissedAlerts, setDismissedAlerts] = useState([]);
@@ -1042,7 +1044,8 @@ export default function CashierDashboard() {
             table_id: tableId,
             status: 'confirmed',
             items: drafts.map(d => ({
-              product_id: d.product_id,
+              product_id: d.product_id || d.id,
+              product_name: d.product_name || d.name || '',
               quantity: d.quantity,
               price: d.unit_price,
               note: d.note || ''
@@ -1437,27 +1440,13 @@ export default function CashierDashboard() {
       return;
     }
 
-    const targetItemId = (item.allItemIds && item.allItemIds[item.allItemIds.length - 1]) || item.id;
+    // Món đã gửi Bếp/Bar hoặc đã lên -> bắt buộc mở popup chọn/nhập lý do nghiệp vụ trước khi trừ hoặc hủy
     const newQty = Number(item.quantity || 1) + delta;
-    if (newQty <= 0) return handleCancelItem(item);
-
-    try {
-      const res = await fetch(`${API_BASE}/api/kitchen/items/${targetItemId}/quantity`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ quantity: 1 })
-      });
-      if (!res.ok || (item.allItemIds && item.allItemIds.length > 1)) {
-        await fetch(`${API_BASE}/api/kitchen/items/${targetItemId}/cancel`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ reason: 'Giảm số lượng trên hóa đơn' })
-        });
-      }
-      await fetchData();
-    } catch (err) {
-      console.error(err);
-    }
+    setVoidItemModal({
+      item,
+      mode: newQty <= 0 ? 'CANCEL_ALL' : 'DECREASE',
+      reason: 'Khách đổi ý / Trả lại món'
+    });
   };
 
   const handleCancelItem = async (item) => {
@@ -1473,48 +1462,88 @@ export default function CashierDashboard() {
       return;
     }
 
-    const idsToCancel = item.allItemIds || [item.id];
-    const itemName = item.product_name || item.name || 'món này';
-    const st = String(item.kitchen_status || 'pending').toLowerCase();
+    // Món đã báo Bếp/Bar hoặc đã lên -> mở popup xác nhận lý do hủy món
+    const isOut = String(item.kitchen_status || '').toLowerCase() === 'out_of_stock';
+    setVoidItemModal({
+      item,
+      mode: 'CANCEL_ALL',
+      reason: isOut ? 'Bếp báo hết nguyên liệu' : 'Khách đổi ý / Hủy món'
+    });
+  };
 
-    let cancelReason = 'Khách yêu cầu hủy món';
-    if (st === 'cooking' || st === 'preparing' || st === 'served' || st === 'ready' || st === 'partial_served') {
-      const inputReason = window.prompt(
-        `⚠️ Món "${itemName}" đang ở trạng thái chế biến/đã lên.\nNhập lý do xóa món:`
-      );
-      if (inputReason === null) return;
-      cancelReason = inputReason.trim() || 'Thu ngân xóa món';
+  const handleConfirmVoidItem = async () => {
+    if (!voidItemModal || !voidItemModal.item) return;
+    const { item, mode, reason } = voidItemModal;
+    const finalReason = String(reason || '').trim();
+    if (!finalReason) {
+      alert('Vui lòng chọn hoặc nhập lý do trước khi xác nhận!');
+      return;
     }
 
     try {
-      await Promise.all(
-        idsToCancel.map(id =>
-          fetch(`${API_BASE}/api/kitchen/items/${id}/cancel`, {
+      if (mode === 'DECREASE') {
+        const targetItemId = (item.allItemIds && item.allItemIds[item.allItemIds.length - 1]) || item.id;
+        // Tìm chính xác dòng order_item gốc trong tableOrders để lấy đúng quantity hiện tại của dòng đó
+        let actualLineQty = Number(item.quantity || 1);
+        for (const ord of tableOrders) {
+          const found = (ord.items || ord.order_items || []).find(it => it.id === targetItemId);
+          if (found) {
+            actualLineQty = Number(found.quantity || 1);
+            break;
+          }
+        }
+
+        if (actualLineQty > 1) {
+          const resQty = await fetch(`${API_BASE}/api/kitchen/items/${targetItemId}/quantity`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ reason: cancelReason })
-          })
-        )
-      );
-
-      const nextReqs = staffCancelRequests.filter(r => !idsToCancel.includes(r.item_id));
-      localStorage.setItem('pos_staff_cancel_requests', JSON.stringify(nextReqs));
-      setStaffCancelRequests(nextReqs);
-
-      const nextRejected = rejectedItemIds.filter(id => !idsToCancel.includes(id));
-      localStorage.setItem('pos_rejected_item_ids', JSON.stringify(nextRejected));
-      setRejectedItemIds(nextRejected);
+            body: JSON.stringify({ quantity: actualLineQty - 1, reason: finalReason })
+          });
+          if (!resQty.ok) {
+            // Fallback nếu backend chỉ hỗ trợ endpoint /api/orders/items/{id}
+            await fetch(`${API_BASE}/api/orders/items/${targetItemId}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+              body: JSON.stringify({ quantity: actualLineQty - 1, reason: finalReason })
+            });
+          }
+        } else {
+          // Dòng cuối cùng chỉ có 1 phần -> hủy riêng dòng 1 phần này (các lượt trước đó vẫn giữ nguyên)
+          await fetch(`${API_BASE}/api/kitchen/items/${targetItemId}/cancel`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ reason: finalReason })
+          });
+        }
+      } else {
+        const idsToCancel = item.allItemIds || [item.id];
+        for (const id of idsToCancel) {
+          await fetch(`${API_BASE}/api/kitchen/items/${id}/cancel`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ reason: finalReason })
+          });
+        }
+      }
 
       const bc = new BroadcastChannel('smartpos_channel');
-      bc.postMessage({ type: 'CASHIER_CONFIRMED_CANCEL', payload: { item_ids: idsToCancel } });
+      bc.postMessage({
+        type: 'CASHIER_CANCELLED_ITEM',
+        payload: {
+          table_id: selectedTable?.id,
+          item_name: item.product_name || item.name,
+          reason: finalReason
+        }
+      });
       bc.close();
 
+      setVoidItemModal(null);
       await fetchData();
     } catch (err) {
-      alert('Lỗi kết nối khi xóa món!');
+      console.error(err);
+      alert('Lỗi khi cập nhật/hủy món!');
     }
   };
-
   const handleOpenShiftSubmit = async (e) => {
     e.preventDefault();
     const cashNum = Number(startingCash) || 0;
@@ -3166,6 +3195,17 @@ export default function CashierDashboard() {
                         </span>
                       </div>
 
+                      {tableOrders && tableOrders.length >= 2 && (
+                        <button
+                          type="button"
+                          onClick={() => setShowOrderBatchesModal(true)}
+                          className="btn btn-sm btn-primary rounded-pill px-3 py-1 fw-bold d-flex align-items-center gap-1.5 shadow-sm"
+                          style={{ fontSize: '12px' }}
+                        >
+                          <span>📋 Xem {tableOrders.length} lượt gọi món</span>
+                        </button>
+                      )}
+
                       {currentDraftItems.length > 0 && (
                         <span className="badge bg-warning text-dark fw-bolder px-2.5 py-1.5" style={{ fontSize: '12px' }}>
                           {currentDraftItems.length} món nháp chờ F10
@@ -3938,6 +3978,365 @@ export default function CashierDashboard() {
       {/* ================================================================= */}
       {/* CSS CHUẨN: PILL LỌC TO RÕ • LƯỚI BÀN 6 Ô VUÔNG VỨC • BẢNG BO GÓC KHÔNG TRÀN */}
       {/* ================================================================= */}
+      {/* POPUP NỔI: XEM CHI TIẾT TỪNG LƯỢT GỌI MÓN CỦA BÀN */}
+      {showOrderBatchesModal && selectedTable && (
+        <div
+          onClick={() => setShowOrderBatchesModal(false)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            backgroundColor: 'rgba(15, 23, 42, 0.58)',
+            backdropFilter: 'blur(4px)',
+            zIndex: 3500,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '28px'
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white shadow-lg overflow-hidden d-flex flex-column"
+            style={{
+              width: '100%',
+              maxWidth: '660px',
+              maxHeight: '80vh',
+              borderRadius: '20px',
+              border: '1px solid rgba(255,255,255,0.25)'
+            }}
+          >
+            {/* Header xanh */}
+            <div
+              className="d-flex justify-content-between align-items-center text-white flex-shrink-0"
+              style={{
+                background: 'linear-gradient(135deg, #0052cc 0%, #0066ff 100%)',
+                padding: '16px 22px'
+              }}
+            >
+              <div>
+                <h5 className="fw-bolder mb-1" style={{ fontSize: '16.5px', letterSpacing: '0.2px' }}>
+                  Chi tiết các lượt gọi món • {selectedTable.table_number || `Bàn ${selectedTable.id}`}
+                </h5>
+                <div className="text-white-50" style={{ fontSize: '12.5px' }}>
+                  Tổng cộng {tableOrders.length} lượt gọi món trong phiên này
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowOrderBatchesModal(false)}
+                className="btn btn-sm rounded-circle d-flex align-items-center justify-content-center text-white border-0"
+                style={{ width: '34px', height: '34px', backgroundColor: 'rgba(255,255,255,0.2)' }}
+              >
+                <X size={17} />
+              </button>
+            </div>
+
+            {/* Body danh sách từng lượt phiếu (khoảng cách thoáng, không dính) */}
+            <div
+              className="overflow-auto flex-grow-1"
+              style={{
+                backgroundColor: '#f1f5f9',
+                maxHeight: '58vh',
+                padding: '18px 20px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '14px'
+              }}
+            >
+              {tableOrders.map((ord, bIdx) => {
+                const itemsList = (ord.items || ord.order_items || []).filter(
+                  (it) => String(it.item_status || it.status || '').toLowerCase() !== 'cancelled'
+                );
+
+                let savedOrderTimes = {};
+                try {
+                  savedOrderTimes = JSON.parse(localStorage.getItem('pos_order_real_times') || '{}');
+                } catch {}
+                const rawTs =
+                  ord.created_at ||
+                  ord.createdAt ||
+                  ord.ordered_at ||
+                  (typeof dbOrderTimes !== 'undefined' && dbOrderTimes[String(ord.id)]) ||
+                  savedOrderTimes[String(ord.id)];
+
+                let ordTime = '';
+                if (rawTs) {
+                  const dt = new Date(typeof rawTs === 'number' ? rawTs : String(rawTs).replace(' ', 'T'));
+                  if (!isNaN(dt.getTime())) {
+                    ordTime = dt.toLocaleTimeString('vi-VN', {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                      second: '2-digit'
+                    });
+                  }
+                }
+
+                const batchSubtotal = itemsList.reduce(
+                  (s, it) => s + Number(it.unit_price || it.price || 0) * Number(it.quantity || 1),
+                  0
+                );
+
+                return (
+                  <div
+                    key={ord.id || bIdx}
+                    className="bg-white border shadow-sm"
+                    style={{ borderRadius: '16px', padding: '16px 18px' }}
+                  >
+                    {/* Header từng phiếu: tách 2 cụm trái/phải thoáng rõ */}
+                    <div
+                      className="d-flex justify-content-between align-items-center border-bottom flex-wrap"
+                      style={{ paddingBottom: '12px', marginBottom: '12px', gap: '10px' }}
+                    >
+                      <div className="d-flex align-items-center flex-wrap" style={{ gap: '8px' }}>
+                        <span
+                          className="badge rounded-pill bg-primary text-white fw-bold"
+                          style={{ fontSize: '11.5px', padding: '5px 11px' }}
+                        >
+                          Lượt {bIdx + 1}
+                        </span>
+                        <span className="text-secondary" style={{ fontSize: '13px' }}>
+                          Mã phiếu: <b className="text-primary">{ord.order_code || `ORD-${ord.id}`}</b>
+                        </span>
+                        {bIdx > 0 && (
+                          <span
+                            className="badge rounded-pill bg-warning text-dark fw-bold"
+                            style={{ fontSize: '11px', padding: '4px 10px' }}
+                          >
+                            +Gọi thêm
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="d-flex align-items-center" style={{ gap: '10px' }}>
+                        {ordTime && (
+                          <span
+                            className="badge rounded-pill d-inline-flex align-items-center fw-semibold"
+                            style={{
+                              backgroundColor: '#eff6ff',
+                              color: '#1d4ed8',
+                              border: '1px solid #bfdbfe',
+                              fontSize: '11.5px',
+                              padding: '5px 10px',
+                              gap: '5px'
+                            }}
+                          >
+                            <Clock size={12} /> Lúc {ordTime}
+                          </span>
+                        )}
+                        <span
+                          className="fw-bolder text-dark"
+                          style={{
+                            fontSize: '13px',
+                            backgroundColor: '#f8fafc',
+                            border: '1px solid #e2e8f0',
+                            borderRadius: '999px',
+                            padding: '4px 11px'
+                          }}
+                        >
+                          {batchSubtotal.toLocaleString()}đ
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Danh sách món trong lượt */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                      {itemsList.map((it, idx) => {
+                        const qty = Number(it.quantity || 1);
+                        const uPrice = Number(it.unit_price || it.price || 0);
+                        const st = String(it.item_status || it.status || ord.status || '').toLowerCase();
+                        const isServed = st === 'served' || st === 'completed';
+                        const isPending = st === 'pending';
+
+                        return (
+                          <div
+                            key={it.id || idx}
+                            className="border d-flex justify-content-between align-items-center"
+                            style={{
+                              borderRadius: '12px',
+                              backgroundColor: '#f8fafc',
+                              padding: '11px 14px',
+                              gap: '14px'
+                            }}
+                          >
+                            <div style={{ minWidth: 0 }}>
+                              <div className="fw-bold text-dark" style={{ fontSize: '14px', marginBottom: '3px' }}>
+                                {it.product_name || it.name}
+                              </div>
+                              <div className="text-muted" style={{ fontSize: '12px' }}>
+                                Số lượng: <b className="text-danger">{qty}</b> • {uPrice.toLocaleString()}đ / phần
+                              </div>
+                            </div>
+
+                            <div className="d-flex align-items-center flex-shrink-0" style={{ gap: '12px' }}>
+                              <span
+                                className={`badge rounded-pill ${
+                                  isServed
+                                    ? 'bg-success text-white'
+                                    : isPending
+                                    ? 'bg-warning text-dark'
+                                    : 'bg-primary bg-opacity-10 text-primary'
+                                }`}
+                                style={{ fontSize: '11px', padding: '5px 10px' }}
+                              >
+                                {isServed ? 'Đã lên' : isPending ? 'Chờ duyệt' : 'Đang phục vụ'}
+                              </span>
+                              <div
+                                className="fw-bolder text-primary text-end"
+                                style={{ fontSize: '14px', minWidth: '82px' }}
+                              >
+                                {(uPrice * qty).toLocaleString()}đ
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Footer tổng tạm tính */}
+            <div
+              className="bg-white border-top d-flex justify-content-between align-items-center flex-shrink-0"
+              style={{ padding: '14px 22px' }}
+            >
+              <div>
+                <div className="text-secondary" style={{ fontSize: '12px', marginBottom: '2px' }}>
+                  Tổng tạm tính {selectedTable.table_number || `Bàn ${selectedTable.id}`}:
+                </div>
+                <div className="fw-bolder text-danger" style={{ fontSize: '19px', lineHeight: '1.2' }}>
+                  {tableOrders
+                    .reduce(
+                      (sum, o) =>
+                        sum +
+                        (o.items || o.order_items || []).reduce(
+                          (s, i) =>
+                            String(i.item_status || i.status || '').toLowerCase() === 'cancelled'
+                              ? s
+                              : s + Number(i.unit_price || i.price || 0) * Number(i.quantity || 1),
+                          0
+                        ),
+                      0
+                    )
+                    .toLocaleString()}đ
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowOrderBatchesModal(false)}
+                className="btn btn-secondary fw-bold rounded-pill"
+                style={{ fontSize: '13.5px', padding: '8px 22px' }}
+              >
+                Đóng lại
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* POPUP NGHIỆP VỤ: XÁC NHẬN LÝ DO GIẢM / HỦY MÓN ĐÃ BÁO BẾP / ĐÃ LÊN */}
+      {voidItemModal && voidItemModal.item && (
+        <div
+          onClick={() => setVoidItemModal(null)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            backgroundColor: 'rgba(15, 23, 42, 0.6)',
+            backdropFilter: 'blur(3px)',
+            zIndex: 3600,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '20px'
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white shadow-lg overflow-hidden"
+            style={{ width: '100%', maxWidth: '460px', borderRadius: '18px' }}
+          >
+            <div className="px-4 py-3 bg-danger text-white d-flex justify-content-between align-items-center">
+              <div className="fw-bolder" style={{ fontSize: '15.5px' }}>
+                ⚠️ Xác nhận {voidItemModal.mode === 'DECREASE' ? 'giảm số lượng (-1)' : 'hủy món'} đã báo Bếp
+              </div>
+              <button
+                type="button"
+                onClick={() => setVoidItemModal(null)}
+                className="btn btn-sm rounded-circle text-white border-0 d-flex align-items-center justify-content-center"
+                style={{ width: '28px', height: '28px', backgroundColor: 'rgba(255,255,255,0.2)' }}
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="p-4">
+              <div className="p-3 rounded-3 bg-light border mb-3">
+                <div className="fw-bolder text-dark" style={{ fontSize: '14.5px' }}>
+                  {voidItemModal.item.product_name || voidItemModal.item.name}
+                </div>
+                <div className="text-secondary mt-1" style={{ fontSize: '12.5px' }}>
+                  Trạng thái hiện tại: <b className="text-primary">{getKitchenStatusBadge(voidItemModal.item).label}</b> • Số lượng hiện tại: <b>{voidItemModal.item.quantity}</b>
+                </div>
+              </div>
+
+              <label className="fw-bold text-dark mb-2 d-block" style={{ fontSize: '13px' }}>
+                Chọn nhanh lý do nghiệp vụ:
+              </label>
+              <div className="d-flex flex-wrap gap-2 mb-3">
+                {[
+                  'Khách đổi ý / Trả lại món',
+                  'Bếp báo hết nguyên liệu',
+                  'Thu ngân / Nhân viên bấm nhầm',
+                  'Món ra chậm khách hủy',
+                  'Lỗi chất lượng món ăn'
+                ].map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => setVoidItemModal((prev) => ({ ...prev, reason: preset }))}
+                    className={`btn btn-sm rounded-pill px-3 py-1 fw-semibold ${
+                      voidItemModal.reason === preset ? 'btn-danger text-white' : 'btn-outline-secondary'
+                    }`}
+                    style={{ fontSize: '12px' }}
+                  >
+                    {preset}
+                  </button>
+                ))}
+              </div>
+
+              <label className="fw-bold text-dark mb-1 d-block" style={{ fontSize: '13px' }}>
+                Chi tiết lý do hủy / giảm (bắt buộc):
+              </label>
+              <input
+                type="text"
+                value={voidItemModal.reason}
+                onChange={(e) => setVoidItemModal((prev) => ({ ...prev, reason: e.target.value }))}
+                placeholder="Nhập lý do cụ thể..."
+                className="form-control rounded-3"
+              />
+
+              <div className="d-flex justify-content-end gap-2 mt-4">
+                <button
+                  type="button"
+                  onClick={() => setVoidItemModal(null)}
+                  className="btn btn-light border fw-bold rounded-pill px-4"
+                >
+                  Quay lại
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmVoidItem}
+                  className="btn btn-danger fw-bold rounded-pill px-4"
+                >
+                  Xác nhận {voidItemModal.mode === 'DECREASE' ? 'giảm 1 phần' : 'hủy món'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       <style dangerouslySetInnerHTML={{__html: `
         .kv-tab { background: transparent; color: rgba(255, 255, 255, 0.92); border: none; padding: 7px 16px; font-weight: 700; font-size: 13px; border-top-left-radius: 11px; border-top-right-radius: 11px; display: inline-flex; align-items: center; gap: 6px; }
         .kv-tab.active { background: #ffffff; color: #003e9c; }
