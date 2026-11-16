@@ -4,7 +4,7 @@ import { RefreshCw, CheckCircle2, Utensils,
   Repeat, Ban, X, Plus, Minus, Trash2, Search, ChevronRight,
   IdCard, Lock, FileText, MessageSquare, Bell, BarChart3, Eye, Clock } from 'lucide-react';
 
-const API_BASE = 'http://192.168.100.26';
+const API_BASE = window.location.origin;
 const MAX_PREVIEW_ITEMS = 3; // Chỉ hiển thị tối đa 3 món trên thẻ ngoài, bấm vào mở Popup xem hết
 
 export default function StaffDashboard() {

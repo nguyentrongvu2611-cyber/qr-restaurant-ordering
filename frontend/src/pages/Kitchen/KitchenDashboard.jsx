@@ -5,7 +5,7 @@ import {
   History, Utensils, ChefHat, Eye, Wine
 } from 'lucide-react';
 
-const API_BASE = 'http://192.168.100.26';
+const API_BASE = window.location.origin;
 
 // Bảng màu cho danh sách "Tất cả món cần nấu / cần pha" ở cột phải
 const SUMMARY_PALETTES = [

@@ -14,7 +14,7 @@ import ManageTablesPage from './ManageTablesPage';
 import OrderHistoryPage from './OrderHistoryPage';
 import PaymentConfigPage from './PaymentConfigPage';
 
-const API_BASE = 'http://192.168.100.26';
+const API_BASE = window.location.origin;
 
 // Hàm lấy chuỗi YYYY-MM-DD theo giờ địa phương
 const formatDateLocal = (dateObj) => {

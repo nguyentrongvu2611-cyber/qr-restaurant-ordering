@@ -14,7 +14,7 @@ import {
   PieChart, Pie, Cell
 } from 'recharts';
 
-const API_BASE = 'http://192.168.100.26';
+const API_BASE = window.location.origin;
 
 const BANK_CONFIGS = {
   VCB: {

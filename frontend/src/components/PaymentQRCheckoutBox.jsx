@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { RefreshCw, Edit3, CheckCircle2, AlertTriangle } from 'lucide-react';
 
-const API_BASE = 'http://192.168.100.26';
+const API_BASE = window.location.origin;
 
 export default function PaymentQRCheckoutBox({ amount = 0, orderCode = '' }) {
   const [qrInfo, setQrInfo] = useState(null);

@@ -5,7 +5,7 @@ import {
   Edit3, EyeOff, RotateCcw
 } from 'lucide-react';
 
-const API_BASE = 'http://192.168.100.26';
+const API_BASE = window.location.origin;
 
 export default function ManageMenuPage() {
   const [categories, setCategories] = useState([]);

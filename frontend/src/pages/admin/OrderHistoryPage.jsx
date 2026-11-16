@@ -4,7 +4,7 @@ import {
   TrendingUp, ShoppingBag, XCircle, Clock, CheckCircle2, ChefHat
 } from 'lucide-react';
 
-const API_BASE = 'http://192.168.100.26';
+const API_BASE = window.location.origin;
 
 const ORDER_STATUS_MAP = {
   pending: { label: 'Chờ xác nhận', badge: 'bg-warning-subtle text-warning-emphasis border border-warning-subtle' },

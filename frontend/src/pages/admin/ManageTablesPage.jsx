@@ -16,7 +16,7 @@ import {
   Download, Printer, Copy, Check, ExternalLink, Search, Armchair, Key, AlertTriangle 
 } from 'lucide-react';
 
-const API_BASE = 'http://192.168.100.26';
+const API_BASE = window.location.origin;
 
 const STATUS_CONFIG = {
   available: {

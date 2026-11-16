@@ -6,7 +6,7 @@ import {
   Bell, Ban, Lock, Wallet, QrCode, HelpCircle
 } from 'lucide-react';
 
-const API_BASE = 'http://192.168.100.26';
+const API_BASE = window.location.origin;
 
 export default function CustomerMenu() {
   const [searchParams] = useSearchParams();
